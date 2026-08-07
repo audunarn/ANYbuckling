@@ -108,12 +108,9 @@ python -m anybuckling.semianalytical --help
 
 The classes keep their original ANYstructure names (`Structure`,
 `CalcScantlings`, `AllStructure`, `Shell`, `CylinderAndCurvedPlate`,
-`PULSpanel`) so that ANYstructure can switch to this package as a
-dependency without behavioural changes. Fatigue, load combinations,
-optimization, FE integration and the GUI remain in ANYstructure.
-
-Future scope may include additional materials, for example composite
-panels.
+`PULSpanel`) because ANYstructure uses this package as a dependency. Fatigue,
+load combinations, optimization, FE integration, machine-learning prediction,
+and the GUI remain in ANYstructure.
 
 ## Development
 
