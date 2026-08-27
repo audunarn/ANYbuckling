@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ANYbuckling"
-version = "0.1.0"
+version = "0.1.1"
 description = "Buckling of stiffened flat panels, cylinders and curved plates according to DNV standards - prescriptive (DNV-RP-C201/C202) and semi-analytical (S3/U3) methods"
 readme = "README.md"
 license = "GPL-3.0-or-later"

@@ -31,7 +31,7 @@ from .helpers import (
 from .prescriptive.plates import AllStructure, CalcScantlings, Structure
 from .prescriptive.cylinders import CylinderAndCurvedPlate, Shell
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "AllStructure",
