@@ -39,6 +39,7 @@ again by an independent sweep (§8). Sections 3–7 keep the original findings a
 | N1 | Low | **New (sweep)**: C<sub>yG</sub> for tensile σ<sub>y</sub> "may be taken as 1.0" (8.21); code uses a smaller value | **Open** (conservative) | — |
 | N2 | Low | **New (sweep)**: p<sub>0</sub> = 0 when σ<sub>y</sub> is nowhere compressive, (7.9)/(7.10) | Fixed | 329e7dd |
 | N3 | Low | **New (sweep)**: 'Local buckling' returns allowable dimensions (9.1), not UFs; flat-bar web not checked against (9.2) | Docstring fixed; flat-bar web **open** | 329e7dd |
+| P17 | High | **New (sweep)**: for N<sub>Sd</sub> ≥ N<sub>E</sub> the amplification 1/(1 − N<sub>Sd</sub>/N<sub>E</sub>) in (7.50)–(7.64) and (8.12)/(8.13) changes sign; FB 200×18, s = 700, L = 5200, σ<sub>x</sub> = 80, σ<sub>y</sub> = 110 gave a *passing* UF of −54.7 | Fixed: stiffener and girder interaction UFs = ∞; N<sub>Sd</sub>, N<sub>E</sub> reported | 793fc5b, 89c511f |
 | C1 | High | Internal | Fixed | 46cd5a6 |
 | C2 | High | Internal (Sec 4.2.3) | Fixed; stress/force input recorded explicitly by the API | 46cd5a6, d301655 |
 | C3 | High | (3.2.2), (3.6.4), (3.6.7) | Fixed: term-by-term λ<sub>s</sub>², C → ρξ as s<sub>e</sub> → 0 | 46cd5a6 |
@@ -66,16 +67,20 @@ again by an independent sweep (§8). Sections 3–7 keep the original findings a
 | C26 | Low | **New (sweep)**: cone τ uses t<sub>e</sub> instead of t, (4.2.6)/(4.2.7) (conservative ≈ 10 %); cone force input uses ψ = 2 although (4.2.2) includes p r/2t<sub>e</sub> (conservative ≈ 5 %) | **Open** | — |
 | C27 | Low | **New (sweep)**: flat-bar stiffeners use the L/T f<sub>ET</sub> (3.9.6) instead of (3.9.8)/(3.9.9) (+2.5 % f<sub>ET</sub>); `iter_table_2` ignores the end-cap ψ and (3.4.4); stiffened `column_buckling` always uses the curved-panel γ<sub>M</sub> | **Open** | — |
 | C28 | Low | **New (sweep)**: all-zero load raises ZeroDivisionError (pre-existing); `set_panel_spacing` is required even for complete cylinders | **Open** (robustness) | — |
-| S1 | High | Theory | Fixed: `auto_mode_count` (≈ a/b half-waves) | c1f42ef |
+| S1 | High | Theory | Fixed: `auto_mode_count`, ⌈2a/b⌉ + 1 half-waves (see S1′) | c1f42ef, 8fb8376 |
+| S1′ | Medium | **Sweep**: ⌈a/b⌉ + 1 half-waves converge the elastic factor but not the first-yield ultimate (3–7 % low: README S3 1.0415 vs 1.0908 converged) | Fixed: ⌈2a/b⌉ + 1, within 0.2 % of ⌈3a/b⌉ + 1 | 8fb8376 |
 | S2 | High | RP-C201 6.6, 6.8 | Fixed (interim): equivalent drivers from k<sub>σ</sub>(ψ) and 6.8, ψ < −2 bounded by k<sub>σ</sub>(−2) | c1f42ef, d029b55 |
-| S3, S5, S6, S8, S9 | Med./Low | Theory / ECOSYSTEM_GUIDE | **Open** (empirical constants and stiffness choices) | — |
+| S3, S5, S6, S8, S9 | Med./Low | Theory / ECOSYSTEM_GUIDE | **Open** (empirical constants and stiffness choices; S5 quantified again in §8) | — |
 | S4 | Medium | Internal | Fixed: free edge rejected; CL and GL/GT flagged in diagnostics | c1f42ef |
 | S7 | Medium | IACS CSR | Fixed | c1f42ef |
 | U1 | High | Theory | Fixed: capped at the column-type global elastic factor + stability-loss check; confidence "low" | c1f42ef |
+| U1′ | Low–Med. | **Sweep**: the cap also acts through the σ<sub>y</sub>-driven `stiffener-column` candidate, a plate-type mode | Kept and justified: that mode is not in the continuation basis, and RP-C201 (7.9) treats it without reserve; docstring and test | 8fb8376 |
 | U2 | High | ECOSYSTEM_GUIDE | Fixed: lift removed | c1f42ef |
+| U2′ | Medium | **Sweep**: S3 still left pressure-dominated first yield out of the buckling envelope, so buckling UF < ultimate UF in 95 of 199 panels and `'buckling'` acceptance passed panels with ultimate UF > 1 | Fixed: `include_pressure_dominated_yield_in_buckling_strength=True` by default (as U3); `False` keeps the PULS-style exclusion | 8fb8376 |
 | U3 | High | Internal | Fixed: load factors applied; pressure side recorded only (plate side modelled) | c1f42ef |
 | U4 | High | Theory | **Open** (sniped stiffeners under lateral pressure) | — |
 | U5 | High | Internal | Fixed: both ends solved, envelope reported | c1f42ef |
+| U5′ | Medium | **Sweep**: a tension end too small to yield within λ = 100 (e.g. σ<sub>x</sub> = 150 / −2 MPa) made the panel invalid (UF = ∞); buckling diagnostics came from the ultimate end | Fixed: such an end enters with the bound 1/λ<sub>max</sub>; buckling diagnostics from the buckling end | 8fb8376 |
 | U6 | High | Internal | Fixed | c1f42ef |
 | U7, U8, U10, U11 | Med./Low | Theory / ECOSYSTEM_GUIDE | **Open** | — |
 | U9 | Medium | Internal (equilibrium) | Fixed | c1f42ef |
@@ -92,11 +97,17 @@ again by an independent sweep (§8). Sections 3–7 keep the original findings a
 - `conversions.helper_cylinder_stress_to_force_to_stress(..., length_unit=None)`: millimetre
   geometry gives MPa (unchanged), metre geometry gives Pa (moments and torsion were wrong).
 - Complete unstiffened cylinders now report `Column stability check` / `Column stability UF`.
-- SemiAnalytical results change for panels with L/s > 3 (S1), stress gradients (S2, U9), load
+- DNV-RP-C201 stiffener and girder interaction UFs are ∞ when the axial force reaches the Euler
+  force N<sub>E</sub> (P17); before, they could be negative and pass.
+- SemiAnalytical results change for panels with L/s > 1 (S1), stress gradients (S2, U9), load
   factors ≠ 1 (U3), mixed-sign axial stress (U5), pressure-dominated panels (U2) and slender
-  columns (U1). Example: README S3 panel, ultimate UF raw 0.947 → 1.042; U3 test row
-  0.917 → 1.068. Solves are slower for long panels (S3 up to ≈ 0.1 s at L/s = 12, previously
-  ≈ 0.01 s).
+  columns (U1). Example: README S3 panel, ultimate UF raw 0.947 → 1.090; U3 test row
+  0.917 → 1.148. The S3 buckling UF is now never below the ultimate UF (U2′).
+- SemiAnalytical solves are slower, because the converged basis has more modes (Python path,
+  numba not installed, median of 5): S3 at L/s = 3 / 5 / 8 / 12 takes 78 / 138 / 317 / 344 ms
+  (before the fixes 30 / 26 / 19 / 7 ms); U3 10 / 24 / 75 / 194 ms (before 7 / 6 / 6 / 5 ms).
+  `S3SolverConfig(auto_mode_count=False)` restores the old basis and speed, with the old,
+  unconverged values.
 
 ## 1. How the review was done, and its limits
 
@@ -551,3 +562,75 @@ cannot be established here; it should be documented either way, as the ECOSYSTEM
    continuity across formula branch limits (P9, P10, C3, C6, C9). Every defect fix should land with a
    regression test that fails without it (ECOSYSTEM_GUIDE §3). Correct
    `tests/test_structure.py::test_plastic_sec_mod` together with P13.
+
+## 8. Second sweep of the fixes
+
+Each set of fixes was reviewed again, hunk by hunk, against the commit before it. Each sweep
+ran the new tests against both revisions and added scans of its own. The sweep findings are in
+the §0 table as **New (sweep)** or **Sweep** rows. This section summarises the results.
+
+**DNV-RP-C201 (plates).**
+- All fixes were re-read against the 2010 text.
+- New findings: N1–N3.
+- P17 (N<sub>Sd</sub> ≥ N<sub>E</sub> gave a negative, passing UF) came out of the semi-analytical sweep while it compared with
+  RP-C201. It was the most serious sweep finding and is fixed. `verify_c201_plates.py` D13 reproduces it:
+  - FB 200×18, s = 700, L = 5200, σ<sub>x</sub> = 80, σ<sub>y</sub> = 110: N<sub>Sd</sub> = 960 kN > N<sub>E</sub> = 920 kN.
+  - The UF goes from −54.7 to ∞.
+  - At σ<sub>x</sub> = 40 the same panel gives an ordinary 6.24.
+
+**DNV-RP-C202 (cylinders).**
+- The first C7 fix broke millimetre callers of the shared conversion helper (C7′).
+- The column check had also been added to curved panels (C5′).
+- New findings: C21–C28. C21–C23 are fixed; C24–C28 are low and left open.
+
+**Semi-analytical S3/U3.**
+- *S2 checked independently.* A Galerkin reference (sin×sin, n ≤ 24) over a/b 0.5–5 and ψ from 1 to −2
+  shows a maximum unconservative error of 0.0 %.
+  - On a finer grid (a/b 0.15–6, ψ down to −3) the maximum is +0.61 %. That is the error of the RP-C201
+    k<sub>σ</sub>(ψ) fit itself (13.49 against 13.41).
+  - Without the gradient correction the error would reach +55.7 %.
+- *Fixed in this sweep:* S1′ (ultimate convergence of the basis), U2′ (buckling UF ≥ ultimate UF) and U5′
+  (tension-end bound and diagnostics). Each has a regression test that fails on the previous commit.
+- *U1′: the cap was kept for the σ<sub>y</sub>-driven candidate.* The `stiffener-column` candidate is the global
+  orthotropic σ<sub>y</sub> mode, and the continuation basis does not contain it. Without the cap the ultimate
+  would not see global transverse buckling at all.
+  - Example: FB 120×10, s = 700, t = 10, L = 6 m, σ<sub>y</sub> = 120. The capped UF is 5.97; uncapped it
+    would be 2.76.
+  - In the sweep's σ<sub>y</sub> scan, RP-C201 was more severe than the capped value in 7 of 9 capped cases.
+    Removing the cap would have lowered these UFs by up to 2.6×.
+- *S5 measured again (open).* The global stiffness uses Huber's H = √(D<sub>11</sub>D<sub>22</sub>), so the
+  σ<sub>y</sub> candidate, and therefore this cap, is too high.
+  - For the FB panel above, the closed form 2(√(D<sub>11</sub>D)+D)k<sub>x</sub>²/(σ<sub>y</sub>t) with H = D gives
+    0.093, against the solver's 0.168.
+  - In a scan of 157 realistic panels (s 600–900, t 10–20, L 2.4–5 m, σ<sub>x</sub> 50–200, σ<sub>y</sub> 0–100,
+    τ 0–60, p 0–0.08) a global family governed the elastic factor in 5 panels, and the cap was applied in none.
+  - Changing H means recalibrating against PULS, so it is left to the owner.
+- *Low, open:*
+  - The stability-loss check builds its "previous" tangent with the current step's modes, so the
+    interpolated instability load is approximate (it falls back to the previous load, which is conservative).
+  - `_global_slenderness_reduction` uses the mean σ<sub>y</sub> for the Perry reference stress.
+  - The new helpers (`anystructure_panel_inputs`, `axial_buckling_driver`, `plate_mode_tuples`) are not
+    exported from `semianalytical/__init__`.
+  - The singular `anystructure_panel_input` returns only the compression end (documented).
+- *PULS gates not run.* The CLI acceptance gates need the PULS reference CSV and the ship-section files,
+  which are not in the repository. These gates are `max_uf_order_violations`, `max_*_mae` and
+  `baseline_*_mae_delta`.
+  - S1′ raises σ<sub>y</sub>-dominated ultimate UFs by 3–7 %.
+  - U2′ raises the S3 buckling UF of pressure-dominated panels to their ultimate UF, which restores
+    `max_uf_order_violations = 0`.
+  - The U3 baseline gate (Δ MAE ≤ 10⁻⁹) flags any change by design. The owner should rerun the gates,
+    check the MAE and regenerate the baseline.
+- *Runtime* rises with the converged basis; the figures are under "Behaviour changes users will notice"
+  in §0.
+
+**Test and script status at the end of the sweep:** 249 tests pass, and `verify_c201_plates.py`,
+`verify_c202_cylinders.py` and `verify_semianalytical.py` all exit 0.
+
+**Still open after the sweep** (all were already in the code before the review; the
+unconservative ones are marked):
+
+| Area | Items |
+|---|---|
+| RP-C201 | P10 (the jump at V/V<sub>Rd</sub> = 0.5); P11 (15 mm³ vs 15 cm³ floor, needs DNV-OS-C101); N1; N3 flat-bar web |
+| RP-C202 | C11, C16, C17, C19, C20, C24–C28 |
+| Semi-analytical | S3, S5 (unconservative for σ<sub>y</sub>/τ-driven global modes, see above), S6, S8, S9; U4 (sniped stiffeners under pressure, unconservative); U7 (unconservative); U8, U10, U11; the low sweep items above; PULS gates to rerun |
