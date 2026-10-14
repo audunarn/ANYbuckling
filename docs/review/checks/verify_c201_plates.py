@@ -4,10 +4,10 @@ Run from the repository root after ``pip install -e .``::
 
     python docs/review/checks/verify_c201_plates.py
 
-Each block prints the code value next to an independent hand calculation or a
-targeted counter-example. Nothing in the package is modified; where a corrected
-formula is evaluated, it is evaluated here, not patched into the package
-(except D3, which temporarily swaps one method and restores it).
+Each block prints the package value next to an independent hand calculation or a
+targeted counter-example. Blocks marked "(fixed)" show the corrected behaviour on
+this branch; "(information)" blocks show RP-conformant behaviour for context.
+Nothing in the package is modified (D3 temporarily swaps one method and restores it).
 """
 import inspect
 import math
@@ -33,7 +33,7 @@ def build(domain='Flat plate, stiffened', s=680, t=12, l=3300, sx=50, sy=100, ta
         o.set_stiffener(hw=hw, tw=tw, bf=bf, tf=tf, stf_type=ty, spacing=s)
     if domain == 'Flat plate, stiffened with girder':
         hw, tw, bf, tf, ty = gir
-        o.set_girder(hw=hw, tw=tw, bf=bf, tf=tf, stf_type=ty, spacing=700)
+        o.set_girder(hw=hw, tw=tw, bf=bf, tf=tf, stf_type=ty, spacing=700, span=10000)
     kw = dict(calculation_method='DNV-RP-C201 - prescriptive', buckling_acceptance='ultimate')
     kw.update(bp)
     o.set_buckling_parameters(**kw)
@@ -97,7 +97,7 @@ print(f'  note: Cys argument = {arg:.3f} < 0, i.e. sigma_y = 100 MPa exceeds sig
       f'effective plate width is zero for this README example.')
 
 # --------------------------------------------------------------------------------------------
-header('D1  Sec 6.5: C_tau_e is computed but overwritten (plates.py:1861-1862); combined check always uses C_tau')
+header('D1  Sec 6.5 (fixed): C_tau_e used in the combined check when sigma_y is compressive (eq. 6.19)')
 o = build('Flat plate, unstiffened', s=1000, t=10, l=3000, sx=30, sy=20, tau=40, p=0)
 d = o._FlatStructure.unstiffened_plate_buckling()
 s, t, l = 1000.0, 10.0, 3000.0
@@ -113,15 +113,19 @@ print(f'  s/t=100, sigma_y compressive, lambda_w={lw:.3f}: UF combined code={d["
       f'with C_tau_e={uf_e:.3f}  ({100 * (uf_e / d["UF Combined stresses"] - 1):+.0f}%)')
 
 # --------------------------------------------------------------------------------------------
-header('D2  Sec 6.4: C_tau middle branch coded as 1-0.675(lw-0.8) up to 1.25; continuous form is 1-0.625(lw-0.8) up to 1.2')
-for lw in (1.0, 1.2, 1.22, 1.25):
-    code = 1 - 0.675 * (lw - 0.8) if lw < 1.25 else 0.9 / lw
-    ref = 1 - 0.625 * (lw - 0.8) if lw <= 1.2 else 0.9 / lw
-    print(f'  lambda_w={lw:.2f}: code={code:.4f}  ref={ref:.4f}  ({100 * (code / ref - 1):+.1f}%, conservative)')
-print('  continuity check of code form at 1.25: left=%.4f right=%.4f' % (1 - 0.675 * 0.45, 0.9 / 1.25))
+header('D2  Sec 6.4 (fixed): C_tau = 1 - 0.625(lw - 0.8) for 0.8 < lw <= 1.2, 0.9/lw above (eq. 6.15)')
+for s_, t_ in ((800, 10), (800, 9), (900, 9), (1000, 9)):
+    l_ = 3 * s_
+    r = build('Flat plate, unstiffened', s=s_, t=t_, l=l_, sx=0, sy=0, tau=40, p=0)._FlatStructure.unstiffened_plate_buckling()
+    kl = 5.34 + 4 * (s_ / l_) ** 2
+    lw = 0.795 * s_ / t_ * math.sqrt(FY / E / kl)
+    c_code = 40 / r['UF Shear stresses'] / (FY / GM / math.sqrt(3))
+    c_ref = 1 if lw <= 0.8 else (1 - 0.625 * (lw - 0.8) if lw <= 1.2 else 0.9 / lw)
+    print(f'  lambda_w={lw:.3f}: C_tau from package={c_code:.4f}  RP (6.15)={c_ref:.4f}  '
+          f'(previous code: {1 - 0.675 * (lw - 0.8) if 0.8 < lw < 1.25 else c_ref:.4f})')
 
 # --------------------------------------------------------------------------------------------
-header('D3  Sec 7.5.2: St. Venant It omits (1 - 0.63 tf/bf) on the flange term (plates.py:651)')
+header('D3  Sec 7.5.2 (information): thin-wall It, as implied by eq. (7.32), vs the stocky-rectangle factor (1 - 0.63 tf/bf)')
 # README bulb (eta = 1 here, so beta = 1): I_t and f_T with and without the (1 - 0.63 tf/bf) factor
 s, t, l = 680.0, 12.0, 3300.0
 It_code = (hw * tw ** 3 + bf * tf ** 3) / 3
@@ -159,7 +163,7 @@ finally:
     P.Structure.get_torsional_moment_venant = orig
 
 # --------------------------------------------------------------------------------------------
-header('D4  Sec 7.7.1: z* optimised separately for the plate-side and stiffener-side sets (plates.py:2201, 2220)')
+header('D4  Sec 7.7.1 (information; RP permits separate z* for (7.50)-(7.53) or (7.54)-(7.57)): separate vs common z*')
 captured = []
 real_minimize = so.minimize
 def spy(fun, x0, bounds=None, **k):
@@ -184,15 +188,18 @@ finally:
 
 # --------------------------------------------------------------------------------------------
 GD = 'Flat plate, stiffened with girder'
-header('D5  API: girder span LG fixed at 10 m (api.py:264,336,376); set_girder(spacing=) has no effect')
-for spc in (700, 9000):
+header('D5  API: girder span L_G (fixed: set_girder(span=...); before the fix it was a 10 m placeholder)')
+import warnings
+for span in (4000, 10000, 16000):
     o = build(GD, sy=40)
-    o.set_girder(hw=500, tw=15, bf=200, tf=25, stf_type='T', spacing=spc)
-    print(f'  set_girder(spacing={spc}) -> {o.get_buckling_results()["Girder"]}')
-for lg in (4.0, 10.0, 16.0):
-    o = build(GD, sy=40)
-    o._FlatStructure.Plate.girder_lg = lg
-    print(f'  Plate.girder_lg={lg:4.1f} m (private attribute) -> {o.get_buckling_results()["Girder"]}')
+    o.set_girder(hw=500, tw=15, bf=200, tf=25, stf_type='T', spacing=700, span=span)
+    r = o.get_buckling_results()['Girder']
+    print(f'  set_girder(span={span:5d}) -> plate side UF={r["Overpressure plate side"]:.3f}, '
+          f'girder side UF={r["Overpressure girder side"]:.3f}')
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter('always')
+    build(GD, sy=40)
+print(f'  set_girder() without span warns: {any("girder span" in str(w.message) for w in caught)}')
 
 girder_dbg = instrumented('girder')
 def girder_locals(**kw):
@@ -204,7 +211,7 @@ def girder_locals(**kw):
     sp = A.stiffened_panel(unstf_pl_data=up)
     return girder_dbg(A, unstf_pl_data=up, stf_pl_data=sp)
 
-header('D6  Sec 7.7.2 applied to sniped girders: equation-set selection inverted (plates.py:2481-2486)')
+header('D6  Sec 7.7.2 applied to sniped girders (fixed): (7.63)/(7.64) when q LG^2/8 < N z*')
 for sx_, sy_ in ((0, 40), (5, 30)):
     gd, L = girder_locals(sx=sx_, sy=sy_, tau=0, p=0.0, girder_support='Sniped')
     q8 = L['qSd_girder_side'] * L['Lg'] ** 2 / 8
@@ -213,7 +220,7 @@ for sx_, sy_ in ((0, 40), (5, 30)):
     print(f'  sx={sx_} sy={sy_}: q LG^2/8={q8:.3e} < NySd z*={nz:.3e}; code UF={gd["UF Simplified girder side"]:.3f}, '
           f'RP selection (7.62/7.63) UF={ref:.3f}')
 
-header('D7  Sec 8.4: shear-lag limit le <= 0.3 LG / 0.4 LG computed (eff_width_sec_mod) but never used')
+header('D7  Sec 8.4.2 (fixed): le <= 0.3 LG / 0.4 LG when calculating W_ep and W_eG')
 gd, L = girder_locals(sx=10, sy=10, tau=5, p=0.002, lg=6.0)
 Gd = L['self']._Girder
 le_lim = L['tot_min_lim']
@@ -222,18 +229,19 @@ zp = Gd.get_cross_section_centroid_with_effective_plate(le_lim / 1000) * 1000 - 
 print(f'  LG=6 m: le used={L["le"]:.0f} mm, 0.3 LG={0.3 * L["Lg"]:.0f} mm; Wep code={L["Wep"]:.3e} mm3 vs '
       f'with limit={Iy / zp:.3e} mm3 ({100 * (L["Wep"] / (Iy / zp) - 1):+.0f}%)')
 
-header('D8  Sec 8.2: p0 for sigma_x in tension uses (l - s/LG) and gammaM instead of (1 - s/LG) and fy (plates.py:2397)')
+header('D8  Sec 8.2 (fixed): p0 for sigma_x in tension per eq. (8.7)')
+gd, L = girder_locals(sx=-60, sy=40, tau=80, panel_length_Lp=6 * 3300)
 t, s, l, Lg, hwG, As = 12.0, 680.0, 3300.0, 10000.0, 500.0, 260 * 12 + 49 * 28
-ref = 0.4 * (t + As / s) / (hwG * (1 - s / Lg)) * FY / E * (Lg / l) ** 2
-code = 0.4 * (t + As / s) / (hwG * (l - s / Lg)) * GM / E * (Lg / l) ** 2
-print(f'  coefficient on C*tau_Sd: code={code:.3e}, compression-form={ref:.3e} (code is {ref / code:.1e}x smaller)')
+ref = 0.4 * (t + As / s) / (hwG * (1 - s / Lg)) * FY / E * (Lg / l) ** 2 * gd['C'] * 80
+print(f'  sigma_x=-60, tau=80: p0 from package={gd["p0"]:.4e} MPa, eq. (8.7)={ref:.4e} MPa '
+      f'(previous code used (l - s/LG) and gammaM: {ref * (1 - s / Lg) / (l - s / Lg) * GM / FY:.1e} MPa)')
 
-header('D9  Sec 8.2: tau_crg defaults to 0.6 fy when panel length Lp is not given (Lp=0 branch, plates.py:2301-2304)')
+header('D9  Sec 8.2 (fixed): unknown panel length L_P -> tau_crg = 0 (L_P -> infinity), not 0.6 fy')
 for Lp in (None, 6 * 3300, 12 * 3300):
     o = build(GD, sx=60, sy=40, tau=80, panel_length_Lp=Lp)
     print(f'  Lp={Lp}: girder plate-side UF={o.get_buckling_results()["Girder"]["Overpressure plate side"]:.3f}')
 
-header('D10 Sec 7.7: reduced web thickness tw(1-V/VRd) switches on at V/VRd=0.5 (jump) and crashes for V/VRd>=1')
+header('D10 Sec 7.8: V/VRd >= 1 now reports failure (was ZeroDivisionError); the jump at V/VRd = 0.5 remains (RP gives no formula)')
 for p in (0.094, 0.0955, 0.19, 0.20):
     try:
         r = build(s=680, t=12, l=3300, sx=50, sy=20, tau=5, p=p, stf=(200, 6, 0, 0, 'FB')).get_buckling_results()
@@ -241,7 +249,7 @@ for p in (0.094, 0.0955, 0.19, 0.20):
     except ZeroDivisionError as err:
         print(f'  p={p}: get_buckling_results() raised ZeroDivisionError ({err})')
 
-header('D11 Special provisions: sigma_y sampled at the low-stress end; Z floor = 15 mm3 instead of 15 cm3')
+header('D11 Special provisions: sigma_y sampling fixed (independent of end labelling); Z floor 15 mm3 vs 15 cm3 unchanged (needs DNV-OS-C101)')
 import copy, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'tests'))
 import example_data as ex
@@ -251,14 +259,14 @@ sc = P.CalcScantlings(dd)
 for y1, y2 in ((200, 0), (0, 200)):
     sc.set_stresses(sigy1=y1, sigy2=y2, sigx1=50, sigx2=50, tauxy=0)
     print(f'  sigma_y1={y1:3d}, sigma_y2={y2:3d}: Z_min={sc.get_dnv_min_section_modulus(200) * 1e9:8.0f} mm3, '
-          f't_min={sc.get_dnv_min_thickness(200):.2f} mm  (same stress field, different answer)')
+          f't_min={sc.get_dnv_min_thickness(200):.2f} mm')
 print(f'  floor used: {15 ** 3} mm3; DNV-OS-C101 floor: 15000 mm3')
 
-header('D12 Structure.get_plasic_section_modulus when the plastic neutral axis lies in the plate (plates.py:501-511)')
+header('D12 Structure.get_plasic_section_modulus with the plastic neutral axis in the plate (fixed)')
 st = P.Structure(dd)
 s_, t_, hw_, tw_, bf_, tf_ = 0.68, 0.025, 0.250297358, 0.012, 0.052, 0.029702642
 a_ = s_ * t_ + hw_ * tw_ + bf_ * tf_
 z_ = a_ / 2 / s_  # PNA depth from plate outer face (inside the plate since a_/2 < s_*t_)
 zp_hand = s_ * z_ ** 2 / 2 + s_ * (t_ - z_) ** 2 / 2 + hw_ * tw_ * (t_ + hw_ / 2 - z_) + bf_ * tf_ * (t_ + hw_ + tf_ / 2 - z_)
 print(f'  tests/example_data.obj_dict: code={st.get_plasic_section_modulus():.4e} m3, hand={zp_hand:.4e} m3 '
-      f'(x{st.get_plasic_section_modulus() / zp_hand:.0f}); tests/test_structure.py::test_plastic_sec_mod pins the code value')
+      f'(ratio {st.get_plasic_section_modulus() / zp_hand:.6f})')
