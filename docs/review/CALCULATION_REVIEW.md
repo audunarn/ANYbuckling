@@ -56,6 +56,16 @@ again by an independent sweep (§8). Sections 3–7 keep the original findings a
 | C15 | — | **Withdrawn**: 3.8.2 defines f<sub>ak</sub> with the actual σ<sub>m</sub>, σ<sub>h</sub>, τ | No change | — |
 | C16, C17, C19, C20 | Low | — | **Open** (C20's σ<sub>h</sub> double count at line 692 fixed) | 46cd5a6 |
 | C18 | Low | Confirmed, (3.5.4) | Fixed | 46cd5a6 |
+| C21 | Low | **New (sweep)**: Table 3-3 torsion ψ = 5.34 + …, code had 5.54 (unconservative, ≈ 0.03 %) | Fixed | 67cb063 |
+| C22 | Medium | **New (sweep)**: geometries 4/8 used the full-cylinder σ<sub>j</sub> for the UF (`[2,6]` test), up to 5× conservative and non-monotonic in σ<sub>m</sub> | Fixed | 67cb063 |
+| C23 | High (legacy input) | **New (sweep)**: heavy ring frames among ring stiffeners used l instead of L<sub>H</sub> in (3.5.5)/(3.5.7)/(3.5.8), 3.5.2 | Fixed; unknown L<sub>H</sub> bounded over l ≤ L<sub>H</sub> ≤ L | 67cb063 |
+| C7′ | High | **Sweep**: the first C7 fix changed the shared helper and broke millimetre callers | Fixed with an explicit `length_unit` | 67cb063 |
+| C5′ | Low | **Sweep**: the column check had been added to curved panels too (3.3.1) | Restricted to geometry 1 | 67cb063 |
+| C24 | Low | **New (sweep)**: `column_buckling` reads `sjsd[idx-1]` from a list that skips absent members (≤ 0.12 % on f<sub>T</sub>; not reachable through `CylStru`) | **Open** | — |
+| C25 | Low | **New (sweep)**: ring-frame hoop branch uses σ<sub>a</sub> instead of σ<sub>x</sub> and omits the additional hoop stress (conservative for p < 0) | **Open** | — |
+| C26 | Low | **New (sweep)**: cone τ uses t<sub>e</sub> instead of t, (4.2.6)/(4.2.7) (conservative ≈ 10 %); cone force input uses ψ = 2 although (4.2.2) includes p r/2t<sub>e</sub> (conservative ≈ 5 %) | **Open** | — |
+| C27 | Low | **New (sweep)**: flat-bar stiffeners use the L/T f<sub>ET</sub> (3.9.6) instead of (3.9.8)/(3.9.9) (+2.5 % f<sub>ET</sub>); `iter_table_2` ignores the end-cap ψ and (3.4.4); stiffened `column_buckling` always uses the curved-panel γ<sub>M</sub> | **Open** | — |
+| C28 | Low | **New (sweep)**: all-zero load raises ZeroDivisionError (pre-existing); `set_panel_spacing` is required even for complete cylinders | **Open** (robustness) | — |
 | S1 | High | Theory | Fixed: `auto_mode_count` (≈ a/b half-waves) | c1f42ef |
 | S2 | High | RP-C201 6.6, 6.8 | Fixed (interim): equivalent drivers from k<sub>σ</sub>(ψ) and 6.8, ψ < −2 bounded by k<sub>σ</sub>(−2) | c1f42ef, d029b55 |
 | S3, S5, S6, S8, S9 | Med./Low | Theory / ECOSYSTEM_GUIDE | **Open** (empirical constants and stiffness choices) | — |
@@ -75,9 +85,13 @@ again by an independent sweep (§8). Sections 3–7 keep the original findings a
 - `FlatStru.set_girder(..., span=L_G_mm)`: girder checks now use the real girder span; omitting
   it warns.
 - `CylStru.set_end_cap_pressure_included_in_stress(is_included=False)` now means what its name
-  says, and its default is `False`, which keeps the previous default results.
-- Unstiffened cylinders and curved panels now report `Column stability check` /
-  `Column stability UF`.
+  says, and its default is `False`, which keeps the previous default results. Passing `True`
+  (ψ = 4) warns, because the old docstring described `True` as "not included".
+- `CylStru.set_length_between_girder(val)` takes L<sub>H</sub> in mm and stores metres; it now
+  affects heavy ring frames used together with ring stiffeners (C23).
+- `conversions.helper_cylinder_stress_to_force_to_stress(..., length_unit=None)`: millimetre
+  geometry gives MPa (unchanged), metre geometry gives Pa (moments and torsion were wrong).
+- Complete unstiffened cylinders now report `Column stability check` / `Column stability UF`.
 - SemiAnalytical results change for panels with L/s > 3 (S1), stress gradients (S2, U9), load
   factors ≠ 1 (U3), mixed-sign axial stress (U5), pressure-dominated panels (U2) and slender
   columns (U1). Example: README S3 panel, ultimate UF raw 0.947 → 1.042; U3 test row
