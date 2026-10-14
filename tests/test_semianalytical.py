@@ -42,12 +42,13 @@ def test_solve_s3_panel():
     assert result.valid is True
     assert result.invalid_reason is None
     # Elastic buckling envelope (local plate + shear, Ritz-combined) with the
-    # local plate basis m = 1..6 for L/s = 4.85 (review S1); was 1.445366740628527
+    # local plate basis m = 1..11 for L/s = 4.85 (review S1); was 1.445366740628527
     # with the fixed m <= 3 basis.
     assert result.buckling_usage_factor == pytest.approx(1.445370673941167, rel=1e-6)
-    # Major-yield ultimate capacity with the m = 1..6 local plate basis (review
-    # S1); the fixed m <= 3 basis gave the unconservative 0.9465671231264069.
-    assert result.ultimate_usage_factor == pytest.approx(1.0415100838527238, rel=1e-6)
+    # Major-yield ultimate capacity with the m = 1..11 local plate basis
+    # (ceil(2 a/b) + 1, review S1); m <= 16 gives 1.0908.  The fixed m <= 3 basis
+    # gave the unconservative 0.9465671231264069 and m <= 6 gave 1.0415100838527238.
+    assert result.ultimate_usage_factor == pytest.approx(1.090471957072501, rel=1e-6)
 
 
 def test_solve_u3_panel():
@@ -55,12 +56,13 @@ def test_solve_u3_panel():
 
     assert result.valid is True
     assert result.invalid_reason is None
-    # Elastic plate/shear buckling envelope with the plate basis m = 1..6 for
+    # Elastic plate/shear buckling envelope with the plate basis m = 1..11 for
     # a/b = 4.85 (review S1); was 1.5899034146913802 with m <= 3.
     assert result.buckling_usage_factor == pytest.approx(1.5899077413352847, rel=1e-6)
-    # First-yield ultimate capacity with the m = 1..6 basis (review S1); the
-    # fixed m <= 3 basis gave the unconservative 0.9166210069632023.
-    assert result.ultimate_usage_factor == pytest.approx(1.067753466419739, rel=1e-6)
+    # First-yield ultimate capacity with the m = 1..11 basis (ceil(2 a/b) + 1,
+    # review S1); m <= 16 gives 1.1483.  The fixed m <= 3 basis gave the
+    # unconservative 0.9166210069632023 and m <= 6 gave 1.067753466419739.
+    assert result.ultimate_usage_factor == pytest.approx(1.1475980366424265, rel=1e-6)
 
 
 def test_original_parity_with_fixed_mode_basis():

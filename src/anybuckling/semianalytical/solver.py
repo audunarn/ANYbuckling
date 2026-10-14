@@ -250,7 +250,14 @@ class S3SolverConfig:
     pressure_global_share: float = 1.0
     use_separate_s3_pressure_modes: bool = True
     s3_pressure_mode_stiffness_factor: float = 5.0
-    include_pressure_dominated_yield_in_buckling_strength: bool = False
+    # The buckling-strength usage factor includes the ultimate capacity, so it
+    # is never below the ultimate usage factor (as in U3, and as the
+    # ``max_uf_order_violations`` gate requires).  False excludes a
+    # pressure-dominated first yield from the buckling-strength envelope (a
+    # PULS-style convention where plate yield under lateral pressure is checked
+    # by the rule scantling formulas); the excluded value is reported in
+    # ``excluded_component_capacity_factors``.
+    include_pressure_dominated_yield_in_buckling_strength: bool = True
     # The Perry-type stiffener lateral-deformation amplification (assumed bow
     # L/1000 per DNV-CG-0128 Sec.6) is part of the PULS stiffener limit
     # states, so it participates in the ultimate yield path by default.
@@ -299,12 +306,14 @@ class S3SolverConfig:
     medium_confidence_drift_limit: float = 0.12
     include_solver_diagnostics: bool = True
     # Plate buckling under longitudinal compression needs about a/b
-    # half-waves.  With ``auto_mode_count`` the S3 local-plate family and the
-    # U3 plate use longitudinal half-waves 1..max(3, ceil(a/b) + 1) together
-    # with ``longitudinal_modes``; plates wider than long (b > a) also use
-    # transverse half-waves 1..max(2, ceil(b/a) + 1) together with
+    # half-waves, and the first-yield ultimate about twice as many.  With
+    # ``auto_mode_count`` the S3 local-plate family and the U3 plate use
+    # longitudinal half-waves 1..max(3, ceil(2 a/b) + 1) together with
+    # ``longitudinal_modes``; plates wider than long (b > a) also use
+    # transverse half-waves 1..max(2, ceil(2 b/a) + 1) together with
     # ``transverse_modes``.  The S3 global families keep the configured tuples.
-    # Set it to False to use exactly the configured mode tuples.
+    # Set it to False to use exactly the configured mode tuples (faster, but
+    # the ultimate is then not converged for a/b > 1).
     auto_mode_count: bool = True
 
 
@@ -1217,11 +1226,30 @@ def _anystructure_envelope_result(
     A single solve is returned unchanged.  For two ends the reported usage
     factors are the maxima over the ends; the result is valid only when every
     end is valid (fail closed), and the confidence is the lowest of the ends.
+
+    One exception: a tension end that does not collapse within
+    ``max_load_factor`` is not a failed solve.  Its ultimate usage factor is
+    below ``1 / max_load_factor``, and its elastic buckling factor is not below
+    the compression end's (the ends differ only in sigma_x, and tension adds a
+    positive semi-definite term to the stiffness), so it is entered with the
+    usage factor bound ``1 / max_load_factor``.
+
+    The ``buckling`` and ``buckling_strength`` diagnostics are taken from the
+    end that governs the buckling usage factor; all other diagnostics come
+    from the end that governs the ultimate usage factor.
     """
 
     if len(solved_ends) == 1:
         return solved_ends[0][2]
 
+    bounded_ends = {
+        label: 1.0 / max(float(result.diagnostics.get("max_load_factor") or 0.0), EPS)
+        for label, _, result in solved_ends
+        if label == "tension-end"
+        and not result.valid
+        and result.invalid_reason == "no-collapse-within-load-range"
+        and float(result.diagnostics.get("max_load_factor") or 0.0) > EPS
+    }
     end_rows = [
         {
             "end": label,
@@ -1231,6 +1259,7 @@ def _anystructure_envelope_result(
             "buckling_usage_factor": result.buckling_usage_factor,
             "ultimate_usage_factor": result.ultimate_usage_factor,
             "elastic_buckling_usage_factor": result.elastic_buckling_usage_factor,
+            "usage_factor_bound": bounded_ends.get(label),
             "confidence": result.confidence,
         }
         for label, panel, result in solved_ends
@@ -1239,6 +1268,13 @@ def _anystructure_envelope_result(
         "mixed-sign axial end stresses: the compression end and the tension end are solved "
         "separately and the reported usage factors are the envelope (maximum) of both"
     )
+    bound_notes = [
+        f"{label} does not collapse within the load range: entered in the envelope with the "
+        f"usage factor bound {bound:.4g} (1 / max_load_factor)"
+        for label, bound in bounded_ends.items()
+    ]
+    usage_floor = max(bounded_ends.values(), default=0.0)
+    solved_ends = [item for item in solved_ends if item[0] not in bounded_ends]
     invalid = [(label, result) for label, _, result in solved_ends if not result.valid]
     if invalid:
         label, result = invalid[0]
@@ -1283,21 +1319,29 @@ def _anystructure_envelope_result(
     for label, _, result in solved_ends:
         confidence_reasons.extend(f"{label}:{reason}" for reason in result.confidence_reasons)
     diagnostics = dict(ultimate_result.diagnostics)
+    for key in ("buckling", "buckling_strength"):
+        if key in buckling_result.diagnostics:
+            diagnostics[key] = buckling_result.diagnostics[key]
     diagnostics["axial_stress_envelope"] = {
         "ends": end_rows,
         "governing_buckling_end": buckling_end,
         "governing_ultimate_end": ultimate_end,
-        "diagnostics_end": ultimate_end,
+        "diagnostics_end": {
+            "buckling": buckling_end,
+            "buckling_strength": buckling_end,
+            "other": ultimate_end,
+        },
         "note": envelope_note,
+        "bound_notes": bound_notes,
     }
     return S3Result(
-        buckling_usage_factor=buckling_result.buckling_usage_factor,
-        ultimate_usage_factor=ultimate_result.ultimate_usage_factor,
+        buckling_usage_factor=max(float(buckling_result.buckling_usage_factor), usage_floor),
+        ultimate_usage_factor=max(float(ultimate_result.ultimate_usage_factor), usage_floor),
         valid=True,
         elastic_buckling_usage_factor=max(elastic_values) if elastic_values else None,
         invalid_reason=None,
         diagnostics=diagnostics,
-        covered_domain_notes=list(ultimate_result.covered_domain_notes) + [envelope_note],
+        covered_domain_notes=list(ultimate_result.covered_domain_notes) + [envelope_note] + bound_notes,
         confidence=confidence,
         confidence_reasons=confidence_reasons,
     )
@@ -3266,9 +3310,16 @@ def _local_pressure_imperfection(panel: S3PanelInput) -> float:
 
 
 def _auto_half_wave_count(loaded_length: float, other_length: float, minimum: int) -> int:
-    """Return max(minimum, ceil(loaded_length / other_length) + 1)."""
+    """Return max(minimum, ceil(2 loaded_length / other_length) + 1).
 
-    ratio = loaded_length / max(other_length, EPS)
+    About a/b half-waves converge the elastic buckling factor, but the
+    first-yield ultimate needs about twice as many: on the README S3/U3
+    panels and on S3/U3 panels up to a/b = 8 the ultimate usage factor with
+    ceil(a/b) + 1 half-waves is 3-6 % below the value with ceil(3 a/b) + 1,
+    with ceil(2 a/b) + 1 within 0.2 % of it.
+    """
+
+    ratio = 2.0 * loaded_length / max(other_length, EPS)
     if not math.isfinite(ratio):
         return minimum
     # The small offset keeps exact integer ratios (e.g. 4000 / 1000) from
@@ -3288,10 +3339,11 @@ def plate_mode_tuples(
 
     This is the S3 local-plate family (a = length, b = stiffener spacing) or
     the U3 plate.  With ``config.auto_mode_count`` the configured tuples are
-    extended so that the basis contains about a/b longitudinal half-waves
+    extended so that the basis contains about 2 a/b longitudinal half-waves
     (S1 of the calculation review: a fixed m <= 3 basis is up to +352 %
-    unconservative at a/b = 12) and, for plates wider than long (b > a),
-    about b/a transverse half-waves.
+    unconservative at a/b = 12, and the ultimate needs about twice the
+    half-waves of the elastic factor) and, for plates wider than long
+    (b > a), about 2 b/a transverse half-waves.
     """
 
     longitudinal = tuple(config.longitudinal_modes)
@@ -5928,7 +5980,17 @@ def _global_column_elastic_cap(buckling: Mapping[str, Any]) -> dict[str, Any] | 
       full attached plate width, simply supported over the span; for m = 1 the
       raw factor is the Euler column ``pi^2 E I / (A L^2) / sigma_x``;
     * ``stiffener-column`` -- the wide-panel orthotropic candidate, which
-      reduces to the same Euler column when no transverse stress acts.
+      reduces to the same Euler column when no transverse stress acts.  Under
+      transverse stress it is the global orthotropic sigma_y mode, in which
+      the stiffeners bend over the span.  That mode is not in the
+      continuation basis (the n >= 1 strip modes vanish at the stiffener
+      lines and the cylindrical modes carry no sigma_y drive), so the
+      continuation cannot follow it past its elastic load; capping at its
+      factor is the only place the ultimate sees global transverse buckling.
+      This matches DNV-RP-C201 Sec 7, which turns transverse compression
+      into stiffener bending through the equivalent lateral load p0 (7.9)
+      with no post-buckling reserve.  The cap is conservative where the mode
+      would in fact develop some membrane reserve.
 
     The family factor is taken as reported in ``modeled_failure_families``,
     i.e. after the elastic local-global (secant) coupling, which is the global

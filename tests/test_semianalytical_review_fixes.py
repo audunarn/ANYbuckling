@@ -197,6 +197,29 @@ def test_u5_envelope_diagnostics_name_the_governing_end():
     assert [label for label, _ in S.anystructure_panel_inputs(structure)] == ['single']
 
 
+@pytest.mark.parametrize('tension', [-0.5, -3.5])
+def test_u5_small_tension_end_does_not_invalidate_the_panel(tension):
+    # |sigma| * max_load_factor = 350 MPa < fy: the tension end cannot yield within the load range, so its
+    # usage factor is below 1 / max_load_factor and the envelope is the compression end.
+    mixed = flat(680, 12, 3300, README_BULB, sx=150, sx2=tension).get_buckling_results()
+    compression_only = flat(680, 12, 3300, README_BULB, sx=150).get_buckling_results()
+    assert abs(tension) * S.S3SolverConfig().max_load_factor < FY
+    assert mixed['valid prediction'] == 1
+    assert mixed['ultimate UF raw'] == pytest.approx(compression_only['ultimate UF raw'], rel=1e-12)
+    assert mixed['buckling UF raw'] == pytest.approx(compression_only['buckling UF raw'], rel=1e-12)
+
+
+def test_u5_envelope_buckling_diagnostics_come_from_the_buckling_end():
+    # The 300 MPa tension end governs the ultimate (sigma / fy); the compression end governs the buckling UF.
+    mixed = flat(900, 10, 3300, README_BULB, sx=100, sx2=-300).get_buckling_results()
+    compression_only = flat(900, 10, 3300, README_BULB, sx=100).get_buckling_results()
+    assert mixed['ultimate UF raw'] == pytest.approx(300.0 / FY, rel=1e-6)
+    assert mixed['buckling UF raw'] == pytest.approx(compression_only['buckling UF raw'], rel=1e-12)
+    assert mixed['buckling UF raw'] > mixed['ultimate UF raw']
+    for key in ('elastic buckling UF raw', 'critical mode', 'critical failure family', 'controlling limit'):
+        assert mixed[key] == compression_only[key]
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # U6 -- CSR proportions use the mm scantlings (no per-value mm/m heuristic)
 # ---------------------------------------------------------------------------------------------------------------------
@@ -273,6 +296,19 @@ def test_u2_ultimate_uf_is_non_decreasing_in_pressure():
     assert all(later >= earlier - 1e-12 for earlier, later in zip(values, values[1:]))
 
 
+@pytest.mark.parametrize('pressure', [0.0, 0.1, 0.4])
+def test_u2_buckling_uf_is_never_below_the_ultimate_uf(pressure):
+    # The buckling-strength capacity is min(ultimate, elastic buckling), so its UF bounds the ultimate UF:
+    # a 'buckling' acceptance can never pass a panel whose ultimate UF fails.
+    panel = flat(500, 18, 1500, (200, 12, 100, 15, 'T'), sx=200, p=pressure)
+    result = panel.get_buckling_results()
+    assert result['valid prediction'] == 1
+    assert result['buckling UF raw'] >= result['ultimate UF raw'] - 1e-12
+    panel.set_buckling_parameters(calculation_method='SemiAnalytical S3/U3', buckling_acceptance='buckling',
+                                  stiffener_support='Continuous')
+    assert panel.get_buckling_results()['selected UF'] >= result['ultimate UF'] - 1e-12
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # U1 -- ultimate capacity never above the global (column) elastic buckling load
 # ---------------------------------------------------------------------------------------------------------------------
@@ -302,9 +338,42 @@ def test_u1_solver_capacity_bounded_by_column_factor_and_flagged():
             result.diagnostics['buckling_strength']['raw_ultimate_capacity_factor'] + 1e-12)
 
 
+def test_u1_ultimate_not_above_global_transverse_mode_outside_the_continuation_basis():
+    # sigma_x = 0: the global orthotropic sigma_y mode (stiffeners bending over the span) is not in the
+    # continuation basis, so its elastic factor bounds the ultimate (RP-C201 Sec 7 treats transverse
+    # compression as stiffener bending through p0, eq. 7.9, without post-buckling reserve).
+    panel = s3_panel(length=6000.0, stiffener_spacing=700.0, plate_thickness=10.0, stiffener_type='Flatbar',
+                     stiffener_height=120.0, web_thickness=10.0, flange_width=0.0, flange_thickness=0.0,
+                     axial_stress=0.0, transverse_stress_1=120.0, transverse_stress_2=120.0, shear_stress=0.0,
+                     pressure=0.0)
+    result = S.solve_s3_panel(panel)
+    strength = result.diagnostics['buckling_strength']
+    assert result.valid is True
+    assert strength['global_column_elastic_cap']['critical_mode'] == 'stiffener-column'
+    assert 1.0 / result.ultimate_usage_factor <= result.diagnostics['buckling']['stiffener_column_factor'] * (1 + 1e-12)
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # S1 -- the Ritz plate basis follows the aspect ratio
 # ---------------------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize('family', ['S3', 'U3'])
+def test_s1_auto_basis_converges_the_ultimate(family):
+    # Discretisation convergence: the auto basis (ceil(2 a/b) + 1 half-waves) is within 0.5 % of a basis with
+    # ceil(3 a/b) + 1 half-waves.  ceil(a/b) + 1 half-waves was 4.5 % (S3) and 7 % (U3) low.
+    if family == 'S3':
+        panel, solve = s3_panel(), S.solve_s3_panel
+    else:
+        panel = S.U3PanelInput(length=3300.0, width=680.0, plate_thickness=12.0, yield_stress_plate=FY,
+                               axial_stress_1=50.0, axial_stress_2=50.0, transverse_stress_1=100.0,
+                               transverse_stress_2=100.0, shear_stress=5.0, pressure=0.01,
+                               in_plane_support='Integrated', rotational_support_1='SS', rotational_support_2='SS')
+        solve = S.solve_u3_panel
+    fine_modes = tuple(range(1, math.ceil(3.0 * 3300.0 / 680.0) + 2))
+    auto = solve(panel).ultimate_usage_factor
+    fine = solve(panel, S.S3SolverConfig(longitudinal_modes=fine_modes)).ultimate_usage_factor
+    assert auto == pytest.approx(fine, rel=5e-3)
+
+
 @pytest.mark.parametrize('aspect', [1, 2, 3, 4, 5, 6, 8, 10, 12])
 def test_s1_u3_elastic_factor_matches_classical_ss_plate(aspect):
     b, t = 1000.0, 12.0
