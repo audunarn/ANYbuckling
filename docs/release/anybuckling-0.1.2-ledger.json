@@ -1,0 +1,28 @@
+{
+  "artifact_source": {
+    "commit": "f123816703ccb779b24b57bc22dd881229464822",
+    "tree": "b88b0cd89139edd856531b38696b4e37453e3198"
+  },
+  "artifacts": [
+    {
+      "bytes": 165072,
+      "filename": "anybuckling-0.1.2-py3-none-any.whl",
+      "sha256": "B22A10EE79E773F479F19788F006DACA0D7E188AD3C64E9309122749B00A05A5"
+    },
+    {
+      "bytes": 195663,
+      "filename": "anybuckling-0.1.2.tar.gz",
+      "sha256": "8F68E0E5A549B6774C12E8E1BF0BD764F68E303C52AE43E2DC877986E07F38A7"
+    }
+  ],
+  "distribution": "ANYbuckling",
+  "publication_authorized": true,
+  "qualification": {
+    "accepted_terminal": "ACCEPTED_ANYBUCKLING_0_1_2_RELEASE",
+    "evidence_sha256": "9B106C711E9427352C4C486D80456E765EBA8688CAACDE247ED22E4CB5EF4DF4",
+    "independent_review_sha256": "DAC4391A750215D7BBB57DD5656FB2A16799B063E5B01C105D7993FA9DDDE4F0"
+  },
+  "schema": "anyecosystem.release-ledger-v1",
+  "tag": "v0.1.2",
+  "version": "0.1.2"
+}
