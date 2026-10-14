@@ -1755,7 +1755,8 @@ def axial_buckling_driver(panel: S3PanelInput | U3PanelInput) -> dict[str, Any]:
     Ritz solution the result stays within the accuracy of the RP-C201
     k_sigma fit (<= +0.6 % for 0.4 <= a/b <= 5, -2 <= psi <= 1).
 
-    Psi below -2 is outside RP-C201 Sec 6.6 and returns ``valid = False``.
+    Psi below -2 is outside RP-C201 Sec 6.6; k_sigma(-2) is used there, a
+    conservative lower bound because k_sigma grows as psi decreases.
     Both edges in tension give no buckling driver (stress 0).
     """
 
@@ -1781,9 +1782,13 @@ def axial_buckling_driver(panel: S3PanelInput | U3PanelInput) -> dict[str, Any]:
     psi = sigma_2 / sigma_1
     k_sigma = dnv_rp_c201_plate_buckling_coefficient(psi)
     summary["psi"] = psi
+    basis = "dnv-rp-c201-6.6-equivalent-uniform"
     if k_sigma is None:
-        summary.update({"stress": None, "valid": False, "basis": "outside-dnv-rp-c201-6.6"})
-        return summary
+        # psi < -2 is outside RP-C201 Sec 6.6. k_sigma increases as psi decreases (the compressed part of
+        # the width shrinks), so k_sigma(-2) is a conservative lower bound for the buckling driver; the
+        # tensile edge still enters the yield checks with its full value.
+        k_sigma = dnv_rp_c201_plate_buckling_coefficient(-2.0)
+        basis = "dnv-rp-c201-6.6-equivalent-uniform, psi < -2 bounded by k_sigma(-2) (conservative)"
     k_uniform = _uniform_compression_plate_coefficient(panel.length, panel.width)
     correction = 1.0 + (k_uniform / 4.0 - 1.0) * min(1.0, 0.5 * (1.0 - psi))
     summary.update(
@@ -1792,7 +1797,7 @@ def axial_buckling_driver(panel: S3PanelInput | U3PanelInput) -> dict[str, Any]:
             "uniform_compression_coefficient": k_uniform,
             "aspect_ratio_correction": correction,
             "stress": 4.0 * sigma_1 / k_sigma * correction,
-            "basis": "dnv-rp-c201-6.6-equivalent-uniform",
+            "basis": basis,
         }
     )
     return summary
@@ -2621,10 +2626,6 @@ def collect_u3_validation_reasons(panel: U3PanelInput, config: S3SolverConfig) -
         # The U3 Ritz basis is simply supported on all four edges; a free edge
         # analysed as simply supported is unconservative, so it fails closed.
         reasons.append("unsupported-rotational-support-free-edge")
-    if not axial_buckling_driver(panel)["valid"]:
-        # Stress ratio psi < -2 across the width is outside DNV-RP-C201
-        # Sec 6.6, which defines the equivalent buckling driver.
-        reasons.append("unsupported-axial-stress-gradient")
     if panel.width > EPS:
         aspect_ratio = panel.length / panel.width
         if aspect_ratio < config.min_aspect_ratio or aspect_ratio > config.max_aspect_ratio:

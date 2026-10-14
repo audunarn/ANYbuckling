@@ -404,11 +404,22 @@ def test_s2_gradient_driver_not_above_exact_ritz_solution(aspect, psi):
     assert k_solver <= k_gradient_ritz(aspect, psi) * 1.01
 
 
-def test_s2_gradient_outside_rp_c201_is_rejected():
-    panel = S.row_to_u3_input(u3_row(3000.0, 1000.0, 12.0, 100.0, -250.0))  # psi = -2.5
+def test_s2_gradient_below_rp_c201_range_is_bounded_conservatively():
+    # psi = -2.5 is outside RP-C201 Sec 6.6; the driver uses k_sigma(-2) = 5.98*9 (a lower bound of the
+    # true k_sigma), and the tensile edge still governs yield: UF >= 250/355.
+    panel = S.row_to_u3_input(u3_row(3000.0, 1000.0, 12.0, 100.0, -250.0))
+    driver = S.axial_buckling_driver(panel)
+    k_uniform = min((m / 3.0 + 3.0 / m) ** 2 for m in range(1, 10))
+    assert driver['stress'] == pytest.approx(4 * 100.0 / (5.98 * 9) * (k_uniform / 4), rel=1e-12)
+    # Yield at the tensile edge: pure tension reproduces sigma/fy exactly; with a buckling compressed part the
+    # membrane redistribution lowers the edge stress by <= 0.2 % in these cases, hence the 0.5 % allowance.
     result = S.solve_u3_panel(panel)
-    assert result.valid is False
-    assert result.invalid_reason == 'unsupported-axial-stress-gradient'
+    assert result.valid is True
+    assert result.ultimate_usage_factor >= 0.995 * 250.0 / 355.0
+
+    mixed = S.solve_u3_panel(S.row_to_u3_input(u3_row(3000.0, 1000.0, 12.0, 20.0, -300.0)))
+    assert mixed.valid is True
+    assert mixed.ultimate_usage_factor >= 0.995 * 300.0 / 355.0
 
 
 @pytest.mark.parametrize('family', ['S3', 'U3'])
