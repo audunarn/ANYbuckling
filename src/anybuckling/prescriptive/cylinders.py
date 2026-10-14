@@ -139,7 +139,14 @@ class Shell():
         return Zl
 
     def get_effective_width_shell_plate(self):
-        return 1.56*math.sqrt(self._radius * self._thk)/(1+12*self.thk/self._radius)
+        '''
+        Effective width of shell plating acting with a ring frame [m], DNV-RP-C202 3.5.2.3:
+        the smaller of 1.56*sqrt(r*t)/(1+12*t/r) (3.5.3) and the ring spacing l (3.5.4).
+        '''
+        lef = 1.56*math.sqrt(self._radius * self._thk)/(1+12*self.thk/self._radius)
+        if self._dist_between_rings is not None and self._dist_between_rings > 0:
+            lef = min(lef, self._dist_between_rings)
+        return lef
 
     def get_main_properties(self):
         main_data = {'plate_thk': [self._thk, 'm'],
@@ -389,6 +396,9 @@ class CylinderAndCurvedPlate():
     @shsd.setter
     def shsd(self, val):
         self._shsd = val
+        # Conical shells: remember, for this value, whether it is the pressure hoop stress p*r/te at the small end
+        # (what CylStru.set_conical_forces stores) or a user-specified additional hoop stress (stress input).
+        self._cone_shsd_origin = (val, self._is_cone_pressure_hoop_stress(val))
     @property
     def panel_spacing(self):
         return self._panel_spacing
@@ -493,6 +503,19 @@ class CylinderAndCurvedPlate():
             if uf_unstf_shell > 1:
                 return False, 'UF unstiffened', results
 
+        # Column buckling of unstiffened shells, required by 3.4.1 b) (Sec. 3.8)
+        if self._geometry in [1, 2]:
+            column_buckling_data = self.unstiffened_column_buckling(unstf_shell_data=unstiffend_shell,
+                                                                    shell_bukcling_data=data_shell_buckling)
+            if column_buckling_data is not None:
+                results['Column stability check'] = column_buckling_data['Column stability check']
+                results['Column stability UF'] = column_buckling_data['Column stability UF']
+                results['Need to check column buckling'] = column_buckling_data['Need to check column buckling']
+
+                if optimizing:
+                    if not results['Column stability check']:
+                        return False, 'Column stability', results
+
         # UF for longitudinal stiffened shell
 
         if self._geometry in [3,4,7,8]:
@@ -510,6 +533,9 @@ class CylinderAndCurvedPlate():
                 if self._geometry in [3,4,7,8] and long_stf_shell['fksd'] > 0:
                     results['Longitudinal stiffened shell'] = long_stf_shell['sjsd_used']/long_stf_shell['fksd']\
                         if self._geometry in [3,4,7,8] else 0
+                elif self._geometry in [3,4,7,8]:
+                    # fksd = 0 means infinite slenderness: report failure instead of silently dropping the check.
+                    results['Longitudinal stiffened shell'] = math.inf if long_stf_shell['sjsd_used'] > 0 else 0.0
 
                 if optimizing:
                     if not results['Column stability check']:
@@ -674,7 +700,9 @@ class CylinderAndCurvedPlate():
 
         for idx, obj in stucture_objects.items():
             if obj is None:
-                shRsd.append(np.nan)
+                # shRsd is indexed [ring stiffener, ring frame] by ring_stiffened_shell; only those two get a slot.
+                if idx in ['Ring Stiffeners', 'Heavy ring Frame']:
+                    shRsd.append(np.nan)
                 continue
             assert self._psd is not None, 'Input missing: self._psd'
 
@@ -689,7 +717,7 @@ class CylinderAndCurvedPlate():
                 assert +self._tQsd is not None, 'Input missing: self._tQsd'
 
                 if stucture_objects['Ring Stiffeners'] == None:
-                    shsd.append(shsd[0]+self._shsd/1e6)
+                    shsd.append(shsd[0])  # shsd[0] = psd*r/t + additional hoop stress (2.2.8)
                 else:
                     shsd_ring = ((self._psd/1e6)*r/t)-parameters[0][0]*parameters[0][3]/(parameters[0][0]+1)*\
                                 ((self._psd/1e6)*r/t-0.3*sxsd[0])
@@ -704,9 +732,10 @@ class CylinderAndCurvedPlate():
 
             elif idx == 'Ring Stiffeners':
                 rf = parameters[0][4]
+                # (2.2.9) midway between rings plus the user's additional hoop stress (as for 'Unstiffened')
                 shsd_ring = ((self._psd / 1e6) * r / t) - parameters[0][0] * parameters[0][3] / (parameters[0][0] + 1) * \
                             ((self._psd / 1e6) * r / t - 0.3 * sxsd[0])
-                shsd.append(np.nan if stucture_objects['Ring Stiffeners'] == None else shsd_ring)
+                shsd.append(np.nan if stucture_objects['Ring Stiffeners'] == None else shsd_ring + self._shsd/1e6)
                 shRsd.append(((self._psd/1e6)*r/t-0.3*sxsd[0])*(1/(1+parameters[0][0]))*(r/rf))
                 if self._geometry > 4:
                     sxsd.append(sxsd[0])
@@ -768,6 +797,40 @@ class CylinderAndCurvedPlate():
             'tQsd': shear,
         }
 
+    def _is_cone_pressure_hoop_stress(self, value):
+        '''
+        True if value equals the pressure hoop stress pSd*r/te (4.2.4) at the small end of the cone for the current
+        geometry and pressure, False if it differs, None if this is not a cone or the cone input is incomplete.
+        '''
+        if self._geometry != 9 or self._Shell is None or self._psd is None or value is None:
+            return None
+        shell = self._Shell
+        if None in [shell.cone_r1, shell.cone_r2, shell.cone_alpha, shell.thk]:
+            return None
+        try:
+            pressure_hoop = self.conical_stress_state(min(shell.cone_r1, shell.cone_r2))['shsd']
+        except (AssertionError, TypeError, ValueError, ZeroDivisionError):
+            return None
+        return math.isclose(value, pressure_hoop, rel_tol=1e-9, abs_tol=1e-6)
+
+    def _cone_additional_hoop_stress(self):
+        '''
+        User-specified hoop stress [Pa] to add to the pressure hoop stress pSd*r/te (4.2.4) along the cone.
+
+        In stress input (CylStru.set_conical_stresses) self._shsd is the user's additional hoop stress. In force
+        input (CylStru.set_conical_forces) it is the pressure hoop stress at the small end, which the cone check
+        recomputes from pSd at every radius, so it must not be added again. The origin is recorded when the value
+        is assigned through the shsd property (robust to later geometry changes); otherwise it is inferred.
+        '''
+        if not self._shsd:
+            return 0.0
+        origin = getattr(self, '_cone_shsd_origin', None)
+        if origin is not None and origin[0] == self._shsd and origin[1] is not None:
+            is_pressure_hoop = origin[1]
+        else:
+            is_pressure_hoop = self._is_cone_pressure_hoop_stress(self._shsd)
+        return 0.0 if is_pressure_hoop else self._shsd
+
     def unstiffened_conical_shell(self):
         shell = self._Shell
         assert shell.cone_r1 is not None, 'Input missing: self._Shell.cone_r1'
@@ -797,6 +860,9 @@ class CylinderAndCurvedPlate():
         else:
             radii = [r_min + (r_max - r_min) * idx / 100 for idx in range(101)]
 
+        # sigma_h,Sd = pSd*r/te (4.2.4) at each radius plus the user's additional hoop stress (stress input only).
+        additional_shsd = self._cone_additional_hoop_stress()
+
         envelope = None
         try:
             for radius in radii:
@@ -807,7 +873,7 @@ class CylinderAndCurvedPlate():
                 self._tTsd = abs(stress_state['tTsd'])
                 self._tQsd = abs(stress_state['tQsd'])
                 self._psd = 0
-                self._shsd = stress_state['shsd']
+                self._shsd = stress_state['shsd'] + additional_shsd
                 shell.radius = equivalent_radius
                 shell.dist_between_rings = equivalent_length
                 shell.length_of_shell = equivalent_length
@@ -825,7 +891,8 @@ class CylinderAndCurvedPlate():
                         'cone alpha': shell.cone_alpha,
                         'sasd': stress_state['sasd'],
                         'smsd': stress_state['smsd'],
-                        'shsd': stress_state['shsd'],
+                        'shsd': stress_state['shsd'] + additional_shsd,
+                        'additional shsd': additional_shsd,
                         'tTsd': stress_state['tTsd'],
                         'tQsd': stress_state['tQsd'],
                         'te': stress_state['te'],
@@ -853,8 +920,13 @@ class CylinderAndCurvedPlate():
 
         # get correct s
 
-        s = min([self._Shell.dist_between_rings, 2*math.pi*self._Shell.radius])*1000 if self._LongStf == None else \
-            self._LongStf.spacing
+        if self._LongStf is not None:
+            s = self._LongStf.spacing
+        elif self._geometry in [2, 6] and self._panel_spacing:
+            # Unstiffened curved panel: s is the panel width (3.3.2, Table 3-1 and Zs (3.3.3)).
+            s = self._panel_spacing*1000
+        else:
+            s = min([self._Shell.dist_between_rings, 2*math.pi*self._Shell.radius])*1000
         v = self._v
         r = self._Shell.radius*1000
         l = self._Shell.dist_between_rings * 1000
@@ -958,7 +1030,8 @@ class CylinderAndCurvedPlate():
                 if lambda_s > 1:
                     gammaM = 1.45 * (self._mat_factor/1.15)
                 else:
-                    gammaM = 0.85+0.6*lambda_s * (self._mat_factor/1.15)
+                    # (3.1.3) scaled as a whole: continuous with mat_factor at 0.5 and 1.45*mf/1.15 at 1.0
+                    gammaM = (0.85+0.6*lambda_s) * (self._mat_factor/1.15)
         if self._uls_or_als == 'ALS':
             gammaM = gammaM/self._mat_factor
         provide_data['gammaM Unstifffed panel'] = gammaM
@@ -1058,7 +1131,12 @@ class CylinderAndCurvedPlate():
         if l / r > test2:
             fEh_used = 0.25 * E * math.pow(t / r, 2)
         else:
-            fEh_used = fElat if self._end_cap_pressure_included == 'not included in axial stresses' else fEhyd
+            # Table 3-2 notes 1/2: hydrostatic psi = 2 covers the pressure on the shell and the end cap and
+            # requires that the axial stress excludes the end-cap pressure; if the axial stress input already
+            # includes it, the lateral pressure coefficient psi = 4 applies.
+            fEh_used = fElat if self._end_cap_pressure_in_axial_stress(self._end_cap_pressure_included) \
+                else fEhyd
+        provide_data['fEh used - Unstifffed circular cylinders'] = fEh_used
 
         sjsd = math.sqrt(math.pow(sxsd,2) - sxsd*shsd + math.pow(shsd,2) + 3 * math.pow(tsd, 2))  # (3.2.3)
 
@@ -1093,7 +1171,8 @@ class CylinderAndCurvedPlate():
                 if lambda_s > 1:
                     gammaM = 1.45 * (self._mat_factor/1.15)
                 else:
-                    gammaM = 0.85+0.6*lambda_s * (self._mat_factor/1.15)
+                    # (3.1.3) scaled as a whole: continuous with mat_factor at 0.5 and 1.45*mf/1.15 at 1.0
+                    gammaM = (0.85+0.6*lambda_s) * (self._mat_factor/1.15)
         if self._uls_or_als == 'ALS':
             gammaM = gammaM/self._mat_factor
 
@@ -1252,8 +1331,8 @@ class CylinderAndCurvedPlate():
         fT = np.array([fT['Ring Stiff.'] if Stocky_profile_factor[0] > 1 else fy,
                        fT['Ring Girder'] if Stocky_profile_factor[1] > 1 else fy])
 
-        fr_used = np.array([fT[0] if self._fab_method_ring_stf == 1 else 0.9 * fT[0],
-                            fT[1] if self._fab_method_ring_girder == 1 else 0.9 * fT[1]])
+        fr_used = np.array([fT[0] if self._is_fabricated(self._fab_method_ring_stf) else 0.9 * fT[0],
+                            fT[1] if self._is_fabricated(self._fab_method_ring_girder) else 0.9 * fT[1]])
         shRsd = [abs(val) for val in data_shell_buckling['shRsd']]
 
         Ih = np.array([0 if E*r0[idx]*(fr_used[idx]/2-shRsd[idx]) == 0 else abs(psd)*r*math.pow(r0[idx],2)*l/(3*E)*
@@ -1412,7 +1491,9 @@ class CylinderAndCurvedPlate():
         for chk in ['Axial stress', 'Torsion and shear stress','Lateral Pressure']:
             psi, epsilon, rho = table_3_3(chk=chk)
 
-            C = 0 if psi == 0 else psi * math.sqrt(1 + math.pow(rho * epsilon / psi, 2))  # (3.4.2) (3.6.4)
+            # (3.6.4) C = psi*sqrt(1+(rho*xi/psi)^2), written as sqrt(psi^2+(rho*xi)^2): identical for psi > 0 and
+            # the correct limit C = rho*xi for psi -> 0 (se -> 0 when sigma_x -> 0, (3.6.7)), so fE stays > 0.
+            C = math.sqrt(math.pow(psi, 2) + math.pow(rho * epsilon, 2))
             fE = C * ((math.pow(math.pi, 2) * E) / (12 * (1 - math.pow(v, 2)))) * math.pow(t / l,2)
             vals.append(fE)
             #print(chk, 'C', C, 'psi', psi,'epsilon', epsilon,'rho' ,rho, 'fE', fE)
@@ -1430,7 +1511,12 @@ class CylinderAndCurvedPlate():
         smsd = smsd * (A + s * t) / (A + Se * t) if A + Se * t > 0 else 0
 
         sa0sd = -sasd if sasd < 0 else 0
-        sm0sd = -smsd if smsd < 0 else 0
+        if self._geometry in [3, 7]:
+            # Full cylinder: the bending stress acts with both signs around the circumference (2.2.3), so its
+            # compressive part (3.2.5) is |sigma_m|, as for the unstiffened cylinder.
+            sm0sd = abs(smsd)
+        else:
+            sm0sd = -smsd if smsd < 0 else 0
         sh0sd = -shsd if shsd < 0 else 0
         #print('fy_used', fy_used,'sasd', sasd,'shsd', shsd, 'tsd', tsd)
         sjsd_panels = math.sqrt(math.pow(sasd+smsd,2)-(sasd+smsd)*shsd + math.pow(shsd,2)+  3*math.pow(tsd,2))
@@ -1442,11 +1528,22 @@ class CylinderAndCurvedPlate():
         sjsd_used = sjsd_panels if self._geometry in [2,6] else sjsd_shells
         provide_data['sjsd_used'] = sjsd_used
 
-        lambda_s2_panel = fy_used/sjsd_panels*((sa0sd+sm0sd)/fEax+sh0sd/fElat+tsd/fEtors) if\
-            sjsd_panels*fEax*fEtors*fElat>0 else 0
+        def stress_ratio(stress, fE):
+            # One term of (3.2.2): a zero stress contributes nothing; a stress without a positive elastic
+            # buckling strength gives infinite slenderness instead of being dropped.
+            if stress == 0:
+                return 0.0
+            return stress/fE if fE > 0 else math.inf
 
-        lambda_s2_shell = fy_used/sjsd_shells*(max(0,-worst_axial_comb)/fEax+sh0sd/fElat+tsd/fEtors) if\
-            sjsd_shells*fEax*fEtors*fElat>0 else 0
+        # (3.2.2): a full cylinder (3, 7) is checked at its most compressed generator, i.e. with the same sigma_j
+        # (worst axial combination) that is used for its utilisation, as for the unstiffened cylinder.
+        sjsd_lambda = sjsd_shells if self._geometry in [3, 7] else sjsd_panels
+        lambda_s2_panel = fy_used/sjsd_lambda*(stress_ratio(sa0sd+sm0sd, fEax) + stress_ratio(sh0sd, fElat) +
+                                               stress_ratio(tsd, fEtors)) if sjsd_lambda > 0 else 0
+
+        lambda_s2_shell = fy_used/sjsd_shells*(stress_ratio(max(0,-worst_axial_comb), fEax) +
+                                               stress_ratio(sh0sd, fElat) + stress_ratio(tsd, fEtors)) \
+            if sjsd_shells > 0 else 0
 
         shell_type = 2 if self._geometry in [1,5] else 1
         lambda_s = math.sqrt(lambda_s2_panel) if shell_type == 1 else math.sqrt(lambda_s2_shell)
@@ -1471,7 +1568,8 @@ class CylinderAndCurvedPlate():
                 if lambda_s > 1:
                     gammaM = 1.45 * (self._mat_factor/1.15)
                 else:
-                    gammaM = 0.85+0.6*lambda_s * (self._mat_factor/1.15)
+                    # (3.1.3) scaled as a whole: continuous with mat_factor at 0.5 and 1.45*mf/1.15 at 1.0
+                    gammaM = (0.85+0.6*lambda_s) * (self._mat_factor/1.15)
 
         if self._uls_or_als == 'ALS':
             gammaM = gammaM/self._mat_factor
@@ -1509,11 +1607,127 @@ class CylinderAndCurvedPlate():
         return Itot
 
     @staticmethod
+    def _end_cap_pressure_in_axial_stress(setting):
+        '''
+        True when the axial stress input already includes the axial stress from pressure on the end caps.
+
+        Accepts the bool stored by CylStru.set_end_cap_pressure_included_in_stress(is_included) and the legacy
+        ANYstructure strings 'included in axial stresses' / 'not included in axial stresses'. Anything else
+        (e.g. None) is treated as not included, i.e. the conservative hydrostatic coefficient psi = 2.
+        '''
+        if isinstance(setting, str):
+            words = setting.strip().lower().replace('_', ' ').split()
+            if 'not' in words or 'excluded' in words or 'false' in words or 'no' in words:
+                return False
+            return 'included' in words or 'true' in words or 'yes' in words
+        if setting is None:
+            return False
+        return bool(setting)
+
+    @staticmethod
+    def _is_fabricated(method):
+        '''
+        Ring frame fabrication method, DNV-RP-C202 3.5.2.6: fabricated fr = fT, cold formed fr = 0.9 fT.
+        Accepts 'Fabricated' / 'Cold formed' (CylStru) and the legacy integer code 1 (= fabricated).
+        '''
+        if isinstance(method, str):
+            return method.strip().lower() in ['fabricated', 'welded']
+        return method == 1
+
+    @staticmethod
     def _column_reduced_buckling_strength(fak, lambda_value):
+        # DNV-RP-C202 (3.8.5) for lambda <= 1.34 and (3.8.6) fkc = 0.9 fak / lambda^2 for lambda > 1.34.
         return (1 - 0.28 * math.pow(lambda_value, 2)) * fak if lambda_value <= 1.34 \
-            else fak / math.pow(lambda_value, 2)
+            else 0.9 * fak / math.pow(lambda_value, 2)
+
+    @staticmethod
+    def _unstiffened_shell_fak(fy, fEa, fEh, shsd):
+        '''
+        Characteristic local buckling strength fak of an unstiffened shell for the column check,
+        DNV-RP-C202 (3.8.8)-(3.8.11). shsd is the design circumferential membrane stress sigma_h,Sd
+        (tension positive). For shsd = 0 the expression reduces to fy/sqrt(1 + fy^2/fEa^2).
+        Returns 0 when the hoop stress alone exhausts the shell (no real positive root).
+        '''
+        a = 1 + math.pow(fy, 2) / math.pow(fEa, 2)                                      # (3.8.9)
+        b = (2 * math.pow(fy, 2) / (fEa * fEh) - 1) * shsd                              # (3.8.10)
+        c = math.pow(shsd, 2) + math.pow(fy, 2) * math.pow(shsd, 2) / math.pow(fEh, 2) \
+            - math.pow(fy, 2)                                                           # (3.8.11)
+        discriminant = math.pow(b, 2) - 4 * a * c
+        if discriminant < 0:
+            return 0.0
+        return max(0.0, (b + math.sqrt(discriminant)) / (2 * a))                        # (3.8.8)
+
+    def unstiffened_column_buckling(self, shell_bukcling_data = None, unstf_shell_data = None):
+        '''
+        Column buckling (DNV-RP-C202 Sec. 3.8) of an unstiffened circular cylinder, required by 3.4.1 b).
+
+        Bare tube section Ac = 2 pi r t, Ic = pi r^3 t. fak from the closed form for unstiffened shells
+        (3.8.8)-(3.8.11) with fEa and fEh of the shell buckling check (3.4) and sigma_h,Sd of that check.
+        gammaM is the material factor of the reported shell buckling check (circular cylinder, or curved
+        panel for geometry 2 with panel width s <= l). Bending acts about one axis: sigma_m1 = |sigma_m|,
+        sigma_m2 = 0.
+
+        Returns None when the effective length factor or the total cylinder length is not given.
+        '''
+        k_factor = self._Shell.k_factor
+        Lc_m = self._Shell.tot_cyl_length
+        if k_factor is None or Lc_m is None or Lc_m <= 0:
+            return None
+
+        shell_buckling_data = self.shell_buckling() if shell_bukcling_data is None else shell_bukcling_data
+        data = self.unstiffened_shell(shell_data=shell_buckling_data) if unstf_shell_data is None \
+            else unstf_shell_data
+
+        E = self._E/1e6
+        fy = self._mat_yield/1e6
+        r = self._Shell.radius*1000
+        t = self._Shell.thk*1000
+        l = self._Shell.dist_between_rings*1000
+        Lc = Lc_m*1000
+        sasd = self._sasd/1e6
+        smsd = self._smsd/1e6
+        shsd = float(data['shsd'])
+
+        Ac = 2*math.pi*r*t
+        Ic = math.pi*math.pow(r, 3)*t
+        ic = math.sqrt(Ic/Ac)
+        need_check = math.pow(k_factor*Lc/ic, 2) >= 2.5*E/fy                         # (3.8.1)
+        fE = math.pow(math.pi, 2)*E*Ic/(math.pow(k_factor*Lc, 2)*Ac) if k_factor*Lc > 0 \
+            else math.inf                                                               # (3.8.3)
+
+        fEa = data['fEax - Unstifffed circular cylinders']
+        fEh = data['fEh used - Unstifffed circular cylinders']
+        fak = self._unstiffened_shell_fak(fy, fEa, fEh, shsd)                          # (3.8.8)-(3.8.11)
+        lambda_ = math.sqrt(fak/fE) if fE > 0 else math.inf                            # (3.8.7)
+        fkc = self._column_reduced_buckling_strength(fak, lambda_)                     # (3.8.5)/(3.8.6)
+
+        s = None if self._panel_spacing is None else self._panel_spacing*1000
+        circular_cylinder = self._geometry == 1 or (s is not None and s > l)
+        gammaM = data['gammaM circular cylinder'] if circular_cylinder else data['gammaM curved panel']
+        fakd = fak/gammaM                                                               # (3.8.12)
+        fkcd = fkc/gammaM                                                               # (3.8.4)
+
+        sa0sd = -sasd if sasd < 0 else 0
+        sm1sd = abs(smsd)
+        if sa0sd == 0 and sm1sd == 0:
+            stab_uf = 0.0
+        elif fakd <= 0 or fkcd <= 0 or sa0sd >= fE:
+            stab_uf = math.inf
+        else:
+            stab_uf = sa0sd/fkcd + (sm1sd/(1 - sa0sd/fE))/fakd                         # (3.8.2)
+
+        return {'Need to check column buckling': bool(need_check),
+                'Column stability check': bool(stab_uf <= 1),
+                'Column stability UF': float(stab_uf),
+                'Ac': Ac, 'Ic': Ic, 'ic': ic, 'fE column': fE, 'fak': fak, 'lambda column': lambda_,
+                'fkc': fkc, 'gammaM column': gammaM, 'fakd': fakd, 'fkcd': fkcd,
+                'stiffener check': None, 'stiffener check detailed': None}
 
     def column_buckling(self,shell_bukcling_data = None, unstf_shell_data = None):
+
+        if all(obj is None for obj in [self._LongStf, self._RingStf, self._RingFrame]):
+            return self.unstiffened_column_buckling(shell_bukcling_data=shell_bukcling_data,
+                                                    unstf_shell_data=unstf_shell_data)
 
         geometry = self._geometry
         provide_data = dict()
@@ -1663,10 +1877,7 @@ class CylinderAndCurvedPlate():
         use_fac = 1 if geometry < 3 else 2
 
         if use_fac == 1:
-            a = 1 + math.pow(fy, 2) / math.pow(fEa, 2)
-            b = ((2 * math.pow(fy, 2) / (fEa * fEh)) - 1) * shsd
-            c = math.pow(shsd, 2) + math.pow(fy, 2) * math.pow(shsd, 2) / math.pow(fEh, 2) - math.pow(fy, 2)
-            fak = 0 if b == 0 else (b + math.sqrt(math.pow(b, 2) - 4 * a * c)) / (2 * a)
+            fak = self._unstiffened_shell_fak(fy, fEa, fEh, shsd)  # (3.8.8)-(3.8.11), valid also for shsd = 0
         elif any([geometry in [1,5], s > l]):
             fak = data['max axial stress - 3.4.2 Shell buckling']
         else:
@@ -1762,7 +1973,8 @@ class CylinderAndCurvedPlate():
             if obj is None:
                 ef_div_tw.append(np.nan)
             else:
-                ef_div_tw.append(obj.get_flange_eccentricity())
+                # (3.10.5) needs the dimensionless ef/tw: eccentricity is returned in m, tw in mm.
+                ef_div_tw.append(np.nan if obj.tw == 0 else obj.get_flange_eccentricity()*1000/obj.tw)
         ef_div_tw = np.array(ef_div_tw)
 
         ef_div_tw_req = list()

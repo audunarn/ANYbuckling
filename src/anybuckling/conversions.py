@@ -29,13 +29,16 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
                                            s=shell_spacing,
                                            t=shell_t)
 
+    # Units: forces in kN, moments in kNm, geometry (shell_radius, shell_t, Itot) in m -> stresses in Pa.
+    # DNV-RP-C202 (2.2.2) sa = N/(2 pi r t), (2.2.3) sm = M r/I (= M/(pi r^2 t) for a bare tube),
+    # (2.2.6) tT = T/(2 pi r^2 t), (2.2.7) tQ = Q/(pi r t). kN -> N and kNm -> Nm are both factor 1000.
     if forces is not None and stresses is None:
         if not conical:
             Nsd, Msd, Tsd, Qsd = forces
             sasd = (Nsd / 2) / (math.pi * shell_radius * eq_thk) * 1000
             smsd = (Msd/ Itot) * \
-                   (shell_radius + shell_t / 2) * 1000000
-            tTsd = (Tsd* 10 ** 6) / (2 * math.pi * shell_t * math.pow(shell_radius, 2))
+                   (shell_radius + shell_t / 2) * 1000
+            tTsd = (Tsd * 1000) / (2 * math.pi * shell_t * math.pow(shell_radius, 2))
             tQsd = Qsd / (math.pi * shell_radius * shell_t) * 1000
             shsd = 0
             return sasd, smsd, tTsd, tQsd, shsd
@@ -57,8 +60,8 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
         if not conical:
             sasd, smsd, tTsd, tQsd, shsd = stresses
             Nsd = (sasd * 2 * math.pi * shell_radius * eq_thk) / 1000
-            Msd = (smsd * Itot) / ((shell_radius + shell_t / 2) * 1000000)
-            Tsd = tTsd * 2 * math.pi * shell_t * math.pow(shell_radius, 2) / 1000000
+            Msd = (smsd * Itot) / ((shell_radius + shell_t / 2) * 1000)
+            Tsd = tTsd * 2 * math.pi * shell_t * math.pow(shell_radius, 2) / 1000
             Qsd = tQsd * math.pi * shell_radius * shell_t / 1000
         else:
             r = shell_radius if shell_radius not in [None, 0] else (cone_r1 + cone_r2) / 2
