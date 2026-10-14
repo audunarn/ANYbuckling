@@ -1845,7 +1845,11 @@ class AllStructure():
         syR = 0 if l*fy == 0 else (1.3*t/l*math.sqrt(E/fy)+kappa*(1-1.3*t/l*math.sqrt(E/fy)))*fy*kp_used
         syRd = syR if not all([sig_y1<0, sig_y2<0]) else fy
         syRd = syRd/gammaM
-        uf_unstf_pl_trans_stress = 0 if syRd == 0 else abs(sysd)/syRd
+        if syRd == 0:
+            # zero resistance (e.g. k_p = 0 at extreme lateral pressure) fails any transverse compression
+            uf_unstf_pl_trans_stress = math.inf if sysd > 0 else 0
+        else:
+            uf_unstf_pl_trans_stress = abs(sysd)/syRd
         #print(uf_unstf_pl_trans_stress)
         unstf_pl_data['syR'] = syR
         unstf_pl_data['syRd'] = syRd
@@ -1892,11 +1896,17 @@ class AllStructure():
         syRd_comb = syRd
 
         sxsd_div_sxrd = 0 if sxRd_comb == 0 else sxsd/sxRd_comb
-        sysd_div_syrd = 0 if syRd_comb == 0 else sysd / syRd_comb
+        if syRd_comb == 0:
+            sysd_div_syrd = math.inf if sysd > 0 else 0
+        else:
+            sysd_div_syrd = sysd / syRd_comb
         tausd_div_taurd = 0 if tauRd_comb == 0 else tsd/tauRd_comb
 
-        comb_req = math.pow(sxsd_div_sxrd, 2)+math.pow(sysd_div_syrd, 2)-ci*sxsd_div_sxrd*sysd_div_syrd+\
-                   math.pow(tausd_div_taurd, 2)
+        if any(math.isinf(ratio) for ratio in (sxsd_div_sxrd, sysd_div_syrd, tausd_div_taurd)):
+            comb_req = math.inf  # a component with zero resistance fails the interaction (avoids 0*inf)
+        else:
+            comb_req = math.pow(sxsd_div_sxrd, 2)+math.pow(sysd_div_syrd, 2)-ci*sxsd_div_sxrd*sysd_div_syrd+\
+                       math.pow(tausd_div_taurd, 2)
         uf_unstf_pl_comb_stress = comb_req
         unstf_pl_data['UF Combined stresses'] = uf_unstf_pl_comb_stress
 
@@ -1969,7 +1979,7 @@ class AllStructure():
             else:
                 ci = 0
 
-            cys_chk = 1 - math.pow(sysd / syR, 2) + ci * ((sxsd * sysd) / (Cxs * fy * syR))
+            cys_chk = -1 if syR <= 0 else 1 - math.pow(sysd / syR, 2) + ci * ((sxsd * sysd) / (Cxs * fy * syR))
             Cys =0 if cys_chk < 0 else math.sqrt(cys_chk)
 
         stf_pl_data['Cys_comp'] = Cys
@@ -1984,7 +1994,8 @@ class AllStructure():
 
         Weff = 0.0001 if zt == 0 else Iy/zt
         Co= 0 if kc*E*t*s == 0 else Weff*fy*mc/(kc*E*math.pow(t,2)*s)
-        Po = 0 if all([sig_y1 < 0, sig_y2 < 0]) else (0.6+0.4*shear_ratio_trans)*Co*sy1sd \
+        # p0 = 0 when sigma_y is not compressive anywhere along the panel (eq. 7.9 with sigma_y1,Sd <= 0, eq. 7.10)
+        Po = 0 if max(sig_y1, sig_y2) <= 0 else (0.6+0.4*shear_ratio_trans)*Co*sy1sd \
             if shear_ratio_trans >-1.5 else 0
         stf_pl_data['C0'] = Co
         stf_pl_data['p0'] = Po
@@ -2024,7 +2035,11 @@ class AllStructure():
         ksp = math.sqrt(1-3*math.pow(tsd/fy,2)) if tsd < (fy/math.sqrt(3)) else 0
         syrd_unstf = unstf_pl_data['syRd'] * ksp
         tsd_7_4 = fy/(math.sqrt(3)*gammaM)
-        uf_stf_panel_res_bet_plate = max([sysd/syrd_unstf if all([syrd_unstf >0, sysd > 0]) else 0, tsd/tsd_7_4])
+        if sysd > 0:
+            uf_sy_7_19 = sysd/syrd_unstf if syrd_unstf > 0 else math.inf
+        else:
+            uf_sy_7_19 = 0
+        uf_stf_panel_res_bet_plate = max([uf_sy_7_19, tsd/tsd_7_4])
         stf_pl_data['UF Plate resistance'] = uf_stf_panel_res_bet_plate
         if optimizing and uf_stf_panel_res_bet_plate > 1:
             return ['UF Plate resistance', uf_stf_panel_res_bet_plate]

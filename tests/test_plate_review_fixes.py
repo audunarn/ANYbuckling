@@ -2,9 +2,12 @@
 Regression tests for the DNV-RP-C201 (October 2010) defects listed in
 docs/review/CALCULATION_REVIEW.md (findings P1, P2, P5-P16).
 
-Expected values come from an independent implementation of the RP formulas
-in this file (unstiffened plate, Sec. 6) or from section properties computed
-here, never from the package's own output.
+Expected values come from an independent implementation of the RP formulas in this
+file (unstiffened plate, Sec. 6) or from section properties computed here. Where a test
+needs resistance parameters of the stiffener or girder (P2, P7, P12, P16 girder), it reads
+the package's intermediate values and checks the RP equation or selection built from
+them; tests of input handling (P1, P8, P16) compare package runs that the RP requires to
+agree or to be ordered.
 '''
 import copy
 import math
@@ -161,8 +164,10 @@ def test_lateral_pressure_reduction_factor_is_not_negative():
     panel = _build('Flat plate, unstiffened', s=1000, t=8, l=3000, sx=0, sy=50, tau=0, p=100.0)
     code = panel._FlatStructure.unstiffened_plate_buckling()
 
-    assert code['syR'] >= 0
-    assert code['UF transverse stresses'] >= 0
+    assert code['syR'] == 0
+    # zero resistance against a compressive transverse stress is a failure, not a pass
+    assert code['UF transverse stresses'] == math.inf
+    assert code['UF Combined stresses'] == math.inf
 
 
 # --------------------------------------------------------------------------------------------
@@ -294,3 +299,49 @@ def test_lateral_support_distance_equal_to_span_matches_no_lateral_support():
     assert with_span['Overpressure plate side'] == pytest.approx(without['Overpressure plate side'], rel=1e-9)
     assert with_span['Overpressure stiffener side'] == pytest.approx(without['Overpressure stiffener side'],
                                                                      rel=1e-9)
+
+
+def test_zero_transverse_resistance_does_not_crash_stiffened_panel():
+    results = _build(s=1000, t=8, l=3000, sx=50, sy=50, tau=0, p=70.0,
+                     stf=(300, 12, 100, 15, 'T')).get_buckling_results()
+
+    assert results['Stiffener']['Resistance between stiffeners'] == math.inf
+
+
+def test_girder_span_is_kept_on_repeated_set_girder():
+    panel = _build(GIRDER, sy=40, girder_span=4000)
+    with warnings.catch_warnings():
+        warnings.simplefilter('error')
+        panel.set_girder(hw=600, tw=15, bf=200, tf=25, stf_type='T', spacing=700)
+
+    assert panel._FlatStructure.Plate.girder_lg == pytest.approx(4.0)
+
+
+def test_girder_lateral_support_closer_than_0_4_lg_governs_both_moment_resistances():
+    # eq. (8.12)/(8.13): l_T = min(0.4 L_G, L_GT) and min(0.8 L_G, L_GT); with L_GT = 2 m < 0.4 L_G
+    # both use 2 m, so M_s1,Rd = M_s2,Rd
+    structure = _build(GIRDER, sx=30, sy=60, tau=5, p=0.02, gir=(500, 15, 100, 15, 'L'),
+                       girder_dist_between_lateral_supp=2000)._FlatStructure
+    unstiffened = structure.unstiffened_plate_buckling()
+    stiffened = structure.stiffened_panel(unstf_pl_data=unstiffened)
+    data = structure.girder(unstf_pl_data=unstiffened, stf_pl_data=stiffened)
+
+    assert data['Ms1Rd'] == pytest.approx(data['Ms2Rd'], rel=1e-12)
+
+
+def test_girder_shear_overload_reports_failure():
+    results = _build(GIRDER, sx=30, sy=40, tau=5, p=0.03,
+                     gir=(500, 4, 200, 25, 'T')).get_buckling_results()['Girder']
+
+    assert results['Shear capacity'] > 1
+    assert results['Overpressure plate side'] == math.inf
+    assert results['Overpressure girder side'] == math.inf
+
+
+def test_no_equivalent_pressure_when_transverse_stress_is_nowhere_compressive():
+    # sigma_y = 0 at one end and tensile at the other: sigma_y1,Sd = 0 in eq. (7.9) -> p0 = 0
+    structure = _build(sx=80, sy=0, sy2=-100, tau=0, p=0.01, stf=(400, 12, 150, 20, 'T'))._FlatStructure
+    unstiffened = structure.unstiffened_plate_buckling()
+    data = structure.stiffened_panel(unstf_pl_data=unstiffened)
+
+    assert data['p0'] == 0

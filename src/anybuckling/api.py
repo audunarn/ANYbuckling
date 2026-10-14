@@ -229,7 +229,8 @@ class FlatStru():
         Stiffener: {'Overpressure plate side': UF, 'Overpressure stiffener side': UF,\n
                     'Resistance between stiffeners': UF, 'Shear capacity': UF}\n
         Girder: {'Overpressure plate side': UF, 'Overpressure girder side': UF, 'Shear capacity': UF}\n
-        Local buckling {'Stiffener': [UF web, UF flange], 'Girder': [UF web, UF flange]}\n
+        Local buckling {'Stiffener': [max web height, max flange outstand], 'Girder': [...]}\n
+        (allowable dimensions in mm per DNV-RP-C201 sec. 9.1; 0 means not checked, e.g. flat-bar web)\n
         SemiAnalytical returns a method result dictionary with buckling/ultimate UF,\n
         raw UF, validity, and selected UF fields.\n
         :return: Buckling results for the selected method\n
@@ -368,18 +369,21 @@ class FlatStru():
         :param spacing: spacing between girders, mm. Not used by the DNV-RP-C201 girder check, where the
                         girder spacing is the stiffener span set in set_plate_geometry.
         :type spacing: float
-        :param span: girder span L_G (distance between girder supports), mm. If omitted, the legacy
-                     placeholder of 10 m is used and a UserWarning is issued.
+        :param span: girder span L_G (distance between girder supports), mm. If omitted, a span given in an
+                     earlier call is kept; otherwise the legacy placeholder of 10 m is used and a UserWarning
+                     is issued.
         :type span: float
         :return:
         :rtype:
         '''
-        if span is None:
+        if span is not None:
+            girder_span_m = self._girder_span_m = api_helpers.mm_to_m(span)
+        elif getattr(self, '_girder_span_m', None) is not None:
+            girder_span_m = self._girder_span_m  # keep the span from an earlier set_girder(span=...)
+        else:
             warnings.warn('set_girder: girder span L_G not given; using the legacy 10 m placeholder girder span. '
                           'Pass span=<L_G in mm> to check the actual girder.', UserWarning, stacklevel=2)
             girder_span_m = 10
-        else:
-            girder_span_m = api_helpers.mm_to_m(span)
         for sub_cls in [self._FlatStructure.Plate, self._FlatStructure.Stiffener]:
             if sub_cls is not None:
                 sub_cls.girder_lg = girder_span_m

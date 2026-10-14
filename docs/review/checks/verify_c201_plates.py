@@ -196,9 +196,13 @@ for span in (4000, 10000, 16000):
     r = o.get_buckling_results()['Girder']
     print(f'  set_girder(span={span:5d}) -> plate side UF={r["Overpressure plate side"]:.3f}, '
           f'girder side UF={r["Overpressure girder side"]:.3f}')
+probe = FlatStru(GD)
+probe.set_material(mat_yield=FY, emodule=E, material_factor=GM, poisson=NU)
+probe.set_plate_geometry(spacing=680, thickness=12, span=3300)
+probe.set_stresses(pressure=0.01, sigma_x1=50, sigma_x2=50, sigma_y1=40, sigma_y2=40, tau_xy=5)
 with warnings.catch_warnings(record=True) as caught:
     warnings.simplefilter('always')
-    build(GD, sy=40)
+    probe.set_girder(hw=500, tw=15, bf=200, tf=25, stf_type='T', spacing=700)
 print(f'  set_girder() without span warns: {any("girder span" in str(w.message) for w in caught)}')
 
 girder_dbg = instrumented('girder')
@@ -218,7 +222,7 @@ for sx_, sy_ in ((0, 40), (5, 30)):
     nz = L['NySd'] * L['zstar']
     ref = max(0, L['uf_7_60'], L['uf_7_61']) if q8 >= nz else max(0, L['uf_7_62'], L['uf_7_63'])
     print(f'  sx={sx_} sy={sy_}: q LG^2/8={q8:.3e} < NySd z*={nz:.3e}; code UF={gd["UF Simplified girder side"]:.3f}, '
-          f'RP selection (7.62/7.63) UF={ref:.3f}')
+          f'RP selection (7.63)/(7.64) UF={ref:.3f}')
 
 header('D7  Sec 8.4.2 (fixed): le <= 0.3 LG / 0.4 LG when calculating W_ep and W_eG')
 gd, L = girder_locals(sx=10, sy=10, tau=5, p=0.002, lg=6.0)
