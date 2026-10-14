@@ -22,7 +22,7 @@ regression test with an independent reference.
   - c<sub>i</sub>, k<sub>p</sub> ≥ 0 and l<sub>T</sub> (P14–P16);
   - p<sub>0</sub> = 0 for tensile σ<sub>y</sub> (N2).
 - **Failures reported instead of errors or wrong signs:**
-  - V ≥ V<sub>Rd</sub> now fails (UF = ∞) instead of raising (P10);
+  - V ≥ V<sub>Rd</sub> now reports failure instead of raising `ZeroDivisionError` (P10);
   - N<sub>Sd</sub> ≥ N<sub>E</sub> now fails (UF = ∞) instead of giving a negative, passing UF (P17).
 - **Plastic section modulus:** corrected for the neutral axis in the plate (P13).
 
@@ -53,7 +53,8 @@ regression test with an independent reference.
 - **Global stiffness:** H = D + G I<sub>t</sub>/(2s) instead of Huber √(D<sub>11</sub>D<sub>22</sub>) (S5).
 - **Ultimate capacity:**
   - capped at the column-type global elastic factor (U1);
-  - no lift for pressure-dominated panels, and the buckling UF is never below the ultimate UF (U2).
+  - no lift for pressure-dominated panels, and the buckling UF is never below the ultimate UF (U2):
+    `S3SolverConfig.include_pressure_dominated_yield_in_buckling_strength` now defaults to `True`.
 - **Load factors:** applied (U3).
 - **Mixed-sign axial stress:** both ends are solved and the envelope is reported (U5).
 - **CSR check:** uses the mm scantlings (U6).
@@ -69,3 +70,14 @@ regression test with an independent reference.
   S3, S6, S8, S9, U4, U7, U8, U10, U11. See §0 and §8 of the review.
 - The PULS benchmark gates have not been rerun: they need the PULS reference data, which is
   not in the repository.
+
+## Release records
+
+- **Artifact source:** `f123816`. The ledger commit `f128896` (tag `v0.1.2`) adds
+  `anybuckling-0.1.2-ledger.json`.
+- **Qualification evidence:** `anybuckling-0.1.2-qualification.json`
+  (SHA-256 `9B106C71…5EF4DF4`).
+- **Independent review:** `anybuckling-0.1.2-independent-review.md`
+  (SHA-256 `DAC4391A…DDDE4F0`, verdict ACCEPT).
+- **Corrections after the review:** two wording fixes in these notes (P10, U2 flag name). The
+  notes are not part of the distributions.

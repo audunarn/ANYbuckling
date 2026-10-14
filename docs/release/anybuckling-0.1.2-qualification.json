@@ -1,0 +1,62 @@
+{
+  "artifact_source": {
+    "commit": "f123816703ccb779b24b57bc22dd881229464822",
+    "previous_release": "v0.1.1 (a871d5a3c466666b79f3ce3a015a2cfd7534376b)",
+    "repository": "https://github.com/audunarn/ANYbuckling",
+    "tree": "b88b0cd89139edd856531b38696b4e37453e3198"
+  },
+  "artifacts": [
+    {
+      "bytes": 165072,
+      "filename": "anybuckling-0.1.2-py3-none-any.whl",
+      "sha256": "b22a10ee79e773f479f19788f006daca0d7e188ad3c64e9309122749b00a05a5"
+    },
+    {
+      "bytes": 195663,
+      "filename": "anybuckling-0.1.2.tar.gz",
+      "sha256": "8f68e0e5a549b6774c12e8e1bf0bd764f68e303c52ae43e2dc877986e07f38a7"
+    }
+  ],
+  "build": {
+    "build_frontend": "build 1.6.1",
+    "command": "git archive f123816 | tar -x; python -m build --outdir dist; python -m twine check dist/*",
+    "os": "Linux 6.18.44 x86_64 (Claude Code cloud container)",
+    "python": "3.13.16",
+    "twine_check": "PASSED (wheel, sdist)"
+  },
+  "distribution": "ANYbuckling",
+  "limitations": [
+    "PULS benchmark gates (max_uf_order_violations, max_*_mae, baseline_*_mae_delta) not run: PULS reference data and ship-section files are not in the repository",
+    "Open review items listed in the release notes are not addressed",
+    "No CI test workflow exists in the repository; tests were run locally as recorded here"
+  ],
+  "omitted_or_failed": [],
+  "references": "Each correction has a regression test with an independent reference (hand calculations per DNV-RP-C201 Oct 2010 / DNV-RP-C202 Jan 2013, closed-form plate and orthotropic buckling, Euler column, independent Ritz/Galerkin solutions); standards texts supplied by the owner, not redistributed",
+  "requirement": "Owner request 2026-10-14: patch release (+0.0.1) of ANYbuckling",
+  "schema": "anybuckling.release-qualification-v1",
+  "scope": "Patch release 0.1.2: calculation-review corrections (DNV-RP-C201, DNV-RP-C202, semi-analytical S3/U3), S5 cross-rigidity and solver performance; see docs/release/anybuckling-0.1.2-notes.md and docs/review/CALCULATION_REVIEW.md",
+  "tag": "v0.1.2",
+  "tests": [
+    {
+      "command": "python -m pytest -q tests (from the source commit, package imported from site-packages)",
+      "environment": "fresh venv, wheel installed, numba absent; numpy 2.5.4, scipy 1.18.1, Python 3.13.16",
+      "result": "252 passed"
+    },
+    {
+      "command": "python -m pytest -q tests",
+      "environment": "fresh venv, wheel installed, numba 0.68.0; numpy 2.5.4, scipy 1.18.1, Python 3.13.16",
+      "result": "252 passed"
+    },
+    {
+      "command": "python -m pytest -q tests",
+      "environment": "fresh venv, sdist installed, numba absent",
+      "result": "252 passed"
+    },
+    {
+      "command": "python docs/review/checks/verify_c201_plates.py; verify_c202_cylinders.py; verify_semianalytical.py",
+      "environment": "wheel venv, numba absent",
+      "result": "all exit 0"
+    }
+  ],
+  "version": "0.1.2"
+}
