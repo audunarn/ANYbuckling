@@ -274,3 +274,12 @@ z_ = a_ / 2 / s_  # PNA depth from plate outer face (inside the plate since a_/2
 zp_hand = s_ * z_ ** 2 / 2 + s_ * (t_ - z_) ** 2 / 2 + hw_ * tw_ * (t_ + hw_ / 2 - z_) + bf_ * tf_ * (t_ + hw_ + tf_ / 2 - z_)
 print(f'  tests/example_data.obj_dict: code={st.get_plasic_section_modulus():.4e} m3, hand={zp_hand:.4e} m3 '
       f'(ratio {st.get_plasic_section_modulus() / zp_hand:.6f})')
+
+header('D13 Sec 7.7 (fixed, P17): N_Sd >= N_E fails; the amplification 1/(1 - N/N_E) in (7.50)-(7.64) changes sign beyond it')
+for sx, sy in ((80, 110), (40, 110)):
+    o = build(s=700, t=12, l=5200, sx=sx, sy=sy, tau=0, p=0.0, stf=(200, 18, 0, 0, 'FB'))
+    fs = o._FlatStructure
+    stf_data = fs.stiffened_panel(unstf_pl_data=fs.unstiffened_plate_buckling())
+    print(f'  FB 200x18, s=700, L=5200, sigma_x={sx}, sigma_y={sy}: N_Sd={stf_data["NSd"] / 1e3:7.1f} kN, '
+          f'N_E={stf_data["NE"] / 1e3:7.1f} kN -> UF plate side={stf_data["UF Plate side"]:.3f} '
+          f'(before the fix: -54.7 at sigma_x=80)')

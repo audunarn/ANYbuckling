@@ -5,7 +5,9 @@ Run from the repository root after ``pip install -e .``::
     python docs/review/checks/verify_semianalytical.py
 
 Configuration changes are made through ``dataclasses.replace`` on S3SolverConfig;
-the package itself is not modified.
+the package itself is not modified. Blocks marked "(fixed)" show the behaviour after the
+fixes on this branch (the review report lists the values before the fixes); "(open)" blocks
+show findings that are still open.
 """
 import dataclasses
 import math
@@ -41,7 +43,7 @@ def sigma_cr_ss(a, b, t):
     return k * math.pi ** 2 * D / (b ** 2 * t)
 
 
-header('S1  Ritz basis fixed at m<=3, n<=2: U3 elastic factor vs closed form (b=1000, t=12, sigma_x=100)')
+header('S1  (fixed) Ritz basis follows the aspect ratio: U3 elastic factor vs closed form (b=1000, t=12, sigma_x=100)')
 rich = dataclasses.replace(S.S3SolverConfig(), longitudinal_modes=tuple(range(1, 13)))
 for ab in (1, 3, 4, 5, 8, 12):
     a = 1000.0 * ab
@@ -54,21 +56,23 @@ for ab in (1, 3, 4, 5, 8, 12):
     print(f'  a/b={ab:2d}: closed form={ref:.4f}  default basis={vals[0]:.4f} ({100 * (vals[0] / ref - 1):+6.1f}%)  '
           f'm<=12 basis={vals[1]:.4f} ({100 * (vals[1] / ref - 1):+.1f}%)')
 
-header('S2  Stress gradients replaced by their mean: in-plane bending psi=-1 gives no buckling driver')
+header('S2  (fixed) In-plane bending psi=-1 drives buckling through the RP-C201 k_sigma(psi) equivalent stress')
 panel = S.row_to_u3_input(u3_row(1000.0, 1000.0, 12.0, 100.0, -100.0))
 cfg = S.S3SolverConfig()
 f = S.elastic_u3_buckling_factors(panel, S.build_u3_ritz_modes(panel, cfg), cfg)
 D = E * 12.0 ** 3 / (12 * (1 - NU ** 2))
-print(f'  sigma_x1=+100, sigma_x2=-100: stress seen by solver={panel.axial_stress}, critical factor={f["critical_factor"]}; '
+print(f'  sigma_x1=+100, sigma_x2=-100 (mean {panel.axial_stress}): equivalent driver={S.axial_buckling_driver(panel)["stress"]:.1f} MPa, '
+      f'critical factor={f["critical_factor"]:.3f}; '
       f'classical k~23.9 -> factor {23.9 * math.pi ** 2 * D / (1000.0 ** 2 * 12.0) / 100:.2f}')
 
-header('S3  U3 rotational supports accepted but not used (SS vs CL identical)')
+header('S4  (fixed) U3 rotational support CL is analysed as SS (conservative) and flagged in support_notes')
 for rot in (('SS', 'SS'), ('CL', 'CL')):
     r = S.solve_u3_panel(S.row_to_u3_input(u3_row(3000.0, 1000.0, 12.0, 100.0, rot=rot)))
-    print(f'  {rot}: buckling UF={r.buckling_usage_factor:.6f} ultimate UF={r.ultimate_usage_factor:.6f}')
+    print(f'  {rot}: buckling UF={r.buckling_usage_factor:.6f} ultimate UF={r.ultimate_usage_factor:.6f} '
+          f'notes={r.diagnostics["support_notes"]}')
 
-header('S4  README S3 panel: sensitivity to mode set and the 1.10 local-plate restraint constant')
-cases = [('default (1,2,3)x(1,2), restraint 1.10', S.S3SolverConfig()),
+header('S3  (open) README S3 panel: sensitivity to mode set and the 1.10 local-plate restraint constant')
+cases = [('default (auto basis), restraint 1.10', S.S3SolverConfig()),
          ('(1..7)x(1,2,3), restraint 1.10', dataclasses.replace(S.S3SolverConfig(), longitudinal_modes=tuple(range(1, 8)),
                                                                transverse_modes=(1, 2, 3))),
          ('(1..7)x(1,2,3), restraint 1.00', dataclasses.replace(S.S3SolverConfig(), longitudinal_modes=tuple(range(1, 8)),
@@ -81,7 +85,7 @@ for sx, sy in ((50.0, 100.0), (150.0, 30.0)):
         print(f'  sx={sx:5.1f} sy={sy:5.1f}  {label:40s} buckling UF={r.buckling_usage_factor:.4f} '
               f'ultimate UF={r.ultimate_usage_factor:.4f}')
 
-header('S5  effective_stiffener_plate_width uses r**1.6; IACS/CSR form is 1.12/(1+1.75 r**-1.6)')
+header('S7  (fixed) effective_stiffener_plate_width follows the IACS/CSR form 1.12/(1+1.75 r**-1.6)')
 for length in (2355.0, 3400.0, 5889.0):
     panel = S.row_to_s3_input(dict(S3_ROW, **{'Length of panel': length}))
     out = S.effective_stiffener_plate_width(panel)
@@ -123,7 +127,7 @@ def euler_full_plate(s, t, L, stf):
     return math.pi ** 2 * E * inertia / (a * L ** 2)
 
 
-header('U1  Ultimate capacity above the column Euler load (solver.py:4913-4925, 5015-5020)')
+header('U1  (fixed) Ultimate capacity capped at the column-type global elastic factor (Euler with full plate)')
 for stf, label in (((120, 10, 0, 0, 'FB'), 'FB 120x10'), ((120, 14, 80, 12, 'T'), 'T 120x14/80x12')):
     r = flat(800, 16, 7000, stf, sx=100).get_buckling_results()
     sE = euler_full_plate(800.0, 16.0, 7000.0, stf)
@@ -132,13 +136,13 @@ for stf, label in (((120, 10, 0, 0, 'FB'), 'FB 120x10'), ((120, 14, 80, 12, 'T')
           f'(raw {r["ultimate UF raw"]:.4f}, valid={r["valid prediction"]}, confidence={r["confidence"]}); '
           f'Euler stress with full plate={sE:.1f} MPa -> UF >= {100 / sE:.2f}; RP-C201 UF={c201["Overpressure plate side"]:.2f}')
 
-header('U2  Pressure-dominated rule lifts the ultimate capacity to the elastic factor (solver.py:5809-5839)')
+header('U2  (fixed) No lift of the ultimate; buckling UF >= ultimate UF; both non-decreasing in pressure')
 for p in (0.0, 0.05, 0.10, 0.40):
     r = flat(500, 18, 1500, (200, 12, 100, 15, 'T'), sx=200, p=p).get_buckling_results()
     print(f'  T 200x12/100x15, sigma_x=200, p={p:4.2f} MPa: ultimate UF raw={r["ultimate UF raw"]:.4f} '
-          f'(sigma_x/fy alone = {200 / 355:.3f})')
+          f'buckling UF raw={r["buckling UF raw"]:.4f} (sigma_x/fy alone = {200 / 355:.3f})')
 
-header('U3  Load factors are ignored by the SemiAnalytical path (api.py:164-217, solver.py:927-998)')
+header('U3  (fixed) Load factors are applied by the SemiAnalytical path, as in the RP-C201 path')
 for lf in (1.0, 1.5):
     kw = dict(s=680, t=12, l=3300, stf=(260, 12, 49, 28, 'bulb'), sx=50, sy=100, tau=5, p=0.01,
               load_factor_stresses=lf, load_factor_pressure=lf)
@@ -146,18 +150,18 @@ for lf in (1.0, 1.5):
     c = flat(method='DNV-RP-C201 - prescriptive', **kw).get_buckling_results()
     print(f'  load factors={lf}: SemiAnalytical ultimate UF={r["ultimate UF"]:.4f} | RP-C201 plate UF={c["Plate"]["Plate buckling"]:.4f}')
 
-header('U4  Sniped stiffener: ultimate UF falls as lateral pressure rises (plate-induced branch sign, solver.py:5008-5014)')
+header('U4  (open) Sniped stiffener: ultimate UF falls as lateral pressure rises (plate-induced branch sign)')
 for p in (0.0, 0.05, 0.10):
     r = flat(800, 10, 3500, (200, 12, 250, 20, 'T'), sx=100, p=p, stiffener_support='Sniped').get_buckling_results()
     print(f'  T 200x12/250x20 sniped, sigma_x=100, p={p:4.2f}: ultimate UF raw={r["ultimate UF raw"]:.4f}')
 
-header('U5  Mixed-sign axial stress keeps only the compression end (solver.py:921-924)')
-for sx1, sx2 in ((20, -300), (20, 20)):
+header('U5  (fixed) Mixed-sign axial stress: both ends solved, envelope reported; a tiny tension end is bounded')
+for sx1, sx2 in ((20, -300), (20, 20), (150, -2), (150, 0)):
     r = flat(680, 12, 3300, (260, 12, 49, 28, 'bulb'), sx=sx1, sx2=sx2).get_buckling_results()
-    print(f'  sigma_x1={sx1}, sigma_x2={sx2}: ultimate UF raw={r["ultimate UF raw"]:.4f} (300 MPa tension alone >= {300 / 355:.3f})')
+    print(f'  sigma_x1={sx1}, sigma_x2={sx2}: ultimate UF raw={r["ultimate UF raw"]:.4f} (tension end alone >= |sigma|/fy = {max(0, -sx2) / 355:.3f})')
 
-header('U6  CSR proportion check reads thicknesses < 10 mm as metres (solver.py:890-896)')
+header('U6  (fixed) CSR proportion check uses the mm scantlings')
 r = flat(700, 8, 3300, (400, 8, 120, 8, 'T'), sx=50, p=0.01).get_buckling_results()
 v = r['CSR requirement']['values']
 print(f'  t=tw=tf=8 mm: plate net thickness used={v["plate_net_thickness"]:.0f} mm, CSR vector={r["CSR"]} ({r["CSR color"]}); '
-      f'hand: s/t_net = 700/6 = {700 / 6:.1f} > limit {v["plate_slenderness_limit"]:.1f} -> should fail')
+      f'hand: s/t_net = 700/6 = {700 / 6:.1f} > limit {v["plate_slenderness_limit"]:.1f} -> fails')
