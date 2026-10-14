@@ -310,6 +310,7 @@ def test_column_buckling_reduction_formula_stays_positive_for_moderate_slenderne
         "Unstiffened conical shell",
     ],
 )
+@pytest.mark.filterwarnings('ignore:set_end_cap_pressure_included_in_stress')
 def test_cylinder_api_domains_return_finite_results(domain):
     cylinder = CylStru(calculation_domain=domain)
     cylinder.set_material(mat_yield=355, emodule=210000, material_factor=1.15, poisson=0.3)

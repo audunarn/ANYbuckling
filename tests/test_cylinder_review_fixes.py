@@ -10,6 +10,9 @@ import math
 
 import pytest
 
+# The end-cap flag True warns about its changed meaning; the tests set it deliberately.
+pytestmark = pytest.mark.filterwarnings('ignore:set_end_cap_pressure_included_in_stress')
+
 from anybuckling import CylStru
 from anybuckling.conversions import helper_cylinder_stress_to_force_to_stress
 from anybuckling.prescriptive.cylinders import CylinderAndCurvedPlate
@@ -278,12 +281,12 @@ def test_c5_unstiffened_tube_column_buckling_with_bending_and_pressure():
     assert c.get_buckling_results()['Column stability UF'] == pytest.approx(hand_uf, rel=1e-9)
 
 
-def test_c5_unstiffened_panel_reports_column_buckling():
-    # Panel wider than l: reported as a circular cylinder (3.3.2), so the column check uses its gammaM.
+def test_c5_unstiffened_curved_panel_has_no_column_check():
+    # RP-C202 3.3.1: for unstiffened curved panels only shell buckling is checked (3.4.1 b) applies to
+    # complete cylinders, geometry 1).
     c = build('Unstiffened panel', r=500, t=12, l=3000, L=40000, panel=4000)
     c.set_stresses(sasd=-150)
-    hand_uf, _, _ = hand_unstiffened_column_uf(500, 12, 3000, 40000, sa=-150)
-    assert c.get_buckling_results()['Column stability UF'] == pytest.approx(hand_uf, rel=1e-9)
+    assert c.get_buckling_results()['Column stability UF'] is None
 
 
 def test_c6_column_curve_beyond_lambda_1_34():
@@ -455,3 +458,88 @@ def test_c13_api_flag_follows_its_name_and_defaults_to_hydrostatic():
     included.set_stresses(psd=-0.15)
     assert included.get_buckling_results()['Unstiffened shell'] == pytest.approx(
         hand_cylinder_shell(6500, 19, 3300, sh=hoop, end_cap_in_axial_stress=True)[0], rel=1e-9)
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Second sweep: conversion units, Table 3-3, panel sigma_j, heavy ring frame L_H, cone reload, end-cap warning
+# ---------------------------------------------------------------------------------------------------------
+def test_force_conversion_millimetre_and_metre_conventions_with_moments():
+    # kN, kNm in; geometry in mm -> MPa, geometry in m -> Pa. tau_T = T/(2 pi r^2 t) (2.2.6) exactly.
+    forces = (1000.0, 10000.0, 10000.0, 500.0)
+    metre = helper_cylinder_stress_to_force_to_stress(forces=forces, geometry=1, shell_t=0.019, shell_radius=6.5,
+                                                      shell_spacing=3.3, CylinderAndCurvedPlate=CylinderAndCurvedPlate)
+    millimetre = helper_cylinder_stress_to_force_to_stress(forces=forces, geometry=1, shell_t=19, shell_radius=6500,
+                                                           shell_spacing=3300,
+                                                           CylinderAndCurvedPlate=CylinderAndCurvedPlate)
+    explicit = helper_cylinder_stress_to_force_to_stress(forces=forces, geometry=1, shell_t=19, shell_radius=6500,
+                                                         shell_spacing=3300, length_unit='mm',
+                                                         CylinderAndCurvedPlate=CylinderAndCurvedPlate)
+    assert millimetre == pytest.approx(explicit, rel=1e-12)
+    for pa, mpa in zip(metre[:4], millimetre[:4]):
+        assert pa == pytest.approx(mpa * 1e6, rel=1e-9)
+    assert millimetre[2] == pytest.approx(10000.0e6 / (2 * math.pi * 6500.0 ** 2 * 19.0), rel=1e-12)
+    # thin-wall bending stress M/(pi r^2 t); the helper uses the outer fibre r + t/2 (0.15 % higher)
+    assert millimetre[1] == pytest.approx(10000.0e6 / (math.pi * 6500.0 ** 2 * 19.0), rel=2e-3)
+    back = helper_cylinder_stress_to_force_to_stress(stresses=millimetre, geometry=1, shell_t=19, shell_radius=6500,
+                                                     shell_spacing=3300, CylinderAndCurvedPlate=CylinderAndCurvedPlate)
+    assert back[:4] == pytest.approx(forces, rel=1e-9)
+
+
+def test_longitudinally_stiffened_panel_uses_panel_von_mises_stress():
+    # Geometry 4 (panel): the UF numerator is sigma_j at the panel, with sigma_x = sigma_a + sigma_m (3.2.3), as
+    # in the slenderness. sigma_m = +50 relieves the panel (sigma_x = -10 MPa), -50 loads it (-110 MPa).
+    def uf(sm):
+        c = build('Longitudinal Stiffened panel', long=LONG)
+        c.set_stresses(sasd=-60, smsd=sm, shsd=-30)
+        return c.get_buckling_results()['Longitudinal stiffened shell']
+
+    relieved, loaded = uf(50), uf(-50)
+    # Reducing the compression at the panel cannot increase its UF (before the fix: 1.663 vs 0.638, because the
+    # numerator used the worst generator of a full cylinder, sigma_a - |sigma_m| = -110 MPa, in both cases).
+    assert relieved < loaded
+
+
+def _legacy_ring_and_frame(length_between_girders):
+    import copy
+    import example_data as ex
+    from anybuckling.prescriptive.cylinders import Shell
+    from anybuckling.prescriptive.plates import Structure
+    main = copy.deepcopy(ex.shell_main_dict2)
+    main['ring frame excluded'] = [False, '']
+    main['length between girders'] = [length_between_girders, 'm']
+    frame = copy.deepcopy(ex.obj_dict_heavy)
+    frame['panel or shell'] = ['shell', '']
+    cylinder = CylinderAndCurvedPlate(main, Shell(copy.deepcopy(ex.shell_dict)), None,
+                                      Structure(copy.deepcopy(ex.obj_dict_cyl_ring2)), Structure(frame))
+    return cylinder.get_utilization_factors()['Heavy ring frame']
+
+
+def test_heavy_ring_frame_uses_distance_between_heavy_frames():
+    # RP-C202 3.5.2: heavy ring frames use (3.5.5), (3.5.7), (3.5.8) with l replaced by L_H. Ih and Ixh grow
+    # with the span, so the frame UF must grow with L_H; with L_H unknown, the bound over l <= L_H <= L is used.
+    at_l = _legacy_ring_and_frame(0.7)          # ring spacing l = 0.7 m (previous behaviour)
+    at_lh = _legacy_ring_and_frame(3.5)
+    at_cylinder_length = _legacy_ring_and_frame(5.0)
+    unknown = _legacy_ring_and_frame(None)
+    assert at_lh > 2 * at_l
+    assert unknown >= at_cylinder_length - 1e-12
+    assert unknown >= at_lh
+
+
+def test_cone_reload_through_main_dict_clears_explicit_additional_hoop_stress():
+    cone = build_cone(r1=4000, r2=4000, length=5000, t=20, endcap=False)
+    cone.set_stresses(sasd=-60, shsd=-50)
+    loaded = cone.get_buckling_results()['Unstiffened conical shell']
+    m = cone._CylinderMain
+    m.set_stresses_and_pressure({'sasd': m.sasd, 'smsd': 0, 'tTsd': 0, 'tQsd': 0, 'psd': 0, 'shsd': 0})
+    plain = build_cone(r1=4000, r2=4000, length=5000, t=20, endcap=False)
+    plain.set_stresses(sasd=-60)
+    assert cone.get_buckling_results()['Unstiffened conical shell'] == pytest.approx(
+        plain.get_buckling_results()['Unstiffened conical shell'], rel=1e-12)
+    assert loaded > cone.get_buckling_results()['Unstiffened conical shell']
+
+
+def test_end_cap_flag_true_warns_about_its_meaning():
+    c = CylStru(calculation_domain='Unstiffened shell')
+    with pytest.warns(UserWarning, match='end-cap pressure'):
+        c.set_end_cap_pressure_included_in_stress(True)

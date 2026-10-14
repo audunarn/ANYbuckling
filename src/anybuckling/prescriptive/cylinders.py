@@ -503,8 +503,9 @@ class CylinderAndCurvedPlate():
             if uf_unstf_shell > 1:
                 return False, 'UF unstiffened', results
 
-        # Column buckling of unstiffened shells, required by 3.4.1 b) (Sec. 3.8)
-        if self._geometry in [1, 2]:
+        # Column buckling of unstiffened cylinders, required by 3.4.1 b) (Sec. 3.8); 3.3.1 lists only shell
+        # buckling for unstiffened curved panels (geometry 2)
+        if self._geometry == 1:
             column_buckling_data = self.unstiffened_column_buckling(unstf_shell_data=unstiffend_shell,
                                                                     shell_bukcling_data=data_shell_buckling)
             if column_buckling_data is not None:
@@ -611,6 +612,7 @@ class CylinderAndCurvedPlate():
         self._tQsd= main_dict['tQsd'][0]
         self._psd = main_dict['psd'][0]
         self._shsd = main_dict['shsd'][0]
+        self._cone_additional_shsd = None  # set again by CylStru cone input; otherwise inferred
         self._geometry = main_dict['geometry'][0]
         self._mat_factor = main_dict['material factor'][0]
         self._delta0 = main_dict['delta0'][0]
@@ -1282,12 +1284,25 @@ class CylinderAndCurvedPlate():
 
         worst_ax_comp = min([sasd+smsd, sasd-smsd])
 
-        Ixreq = np.array([abs(worst_ax_comp) * t * (1 + alfaA) * math.pow(r0[0], 4) / (500 * E * l),
-                          abs(worst_ax_comp) * t * (1 + alfaA) * math.pow(r0[1], 4) / (500 * E * l)])
+        # Span used in (3.5.5), (3.5.7) and (3.5.8). Ring stiffeners: l. A heavy ring frame among ring stiffeners
+        # uses l substituted by L_H (3.5.2, Figure 3-1 d). If L_H is not given, the true L_H lies between l and
+        # the cylinder length L; Ix decreases and Ixh, Ih increase with the span, so the requirement is bounded
+        # conservatively with l for Ix and L for Ixh and Ih. A frame without ring stiffeners has span l.
+        l_Ix, l_Ixh, l_Ih = [l, l], [l, l], [l, l]
+        if self._RingStf is not None and self._RingFrame is not None:
+            LH_given = self._length_between_girders
+            if LH_given not in [None, 0] and LH_given > 0:
+                LH = LH_given * 1000
+                l_Ix[1], l_Ixh[1], l_Ih[1] = LH, LH, LH
+            else:
+                l_Ix[1], l_Ixh[1], l_Ih[1] = l, L, L
+
+        Ixreq = np.array([abs(worst_ax_comp) * t * (1 + alfaA) * math.pow(r0[0], 4) / (500 * E * l_Ix[0]),
+                          abs(worst_ax_comp) * t * (1 + alfaA) * math.pow(r0[1], 4) / (500 * E * l_Ix[1])])
 
         #Pnt. 3.5.2.5   Required Ixh for shell subjected to torsion and/or shear:
-        Ixhreq = np.array([math.pow(tsd / E, (8 / 5)) * math.pow(r0[0] / L, 1 / 5) * L * r0[0] * t * l,
-                           math.pow(tsd / E, (8 / 5)) * math.pow(r0[1] / L, 1 / 5) * L * r0[1] * t * l])
+        Ixhreq = np.array([math.pow(tsd / E, (8 / 5)) * math.pow(r0[0] / L, 1 / 5) * L * r0[0] * t * l_Ixh[0],
+                           math.pow(tsd / E, (8 / 5)) * math.pow(r0[1] / L, 1 / 5) * L * r0[1] * t * l_Ixh[1]])
 
         #Pnt. 3.5.2.6   Simplified calculation of Ih for shell subjected to external pressure
         zt = np.array([data_shell_buckling['parameters'][0][6],data_shell_buckling['parameters'][1][6]])
@@ -1338,7 +1353,7 @@ class CylinderAndCurvedPlate():
                             fT[1] if self._is_fabricated(self._fab_method_ring_girder) else 0.9 * fT[1]])
         shRsd = [abs(val) for val in data_shell_buckling['shRsd']]
 
-        Ih = np.array([0 if E*r0[idx]*(fr_used[idx]/2-shRsd[idx]) == 0 else abs(psd)*r*math.pow(r0[idx],2)*l/(3*E)*
+        Ih = np.array([0 if E*r0[idx]*(fr_used[idx]/2-shRsd[idx]) == 0 else abs(psd)*r*math.pow(r0[idx],2)*l_Ih[idx]/(3*E)*
                                                                         (1.5+3*E*zt[idx]*delta0/(math.pow(r0[idx],2)
                                                                          *(fr_used[idx]/2-shRsd[idx])))
               for idx in [0,1]])
@@ -1480,7 +1495,7 @@ class CylinderAndCurvedPlate():
 
         def table_3_3(chk):
             psi = {'Axial stress': 0 if Se == 0 else (1+alpha) / (1+A/(Se*t)),
-                   'Torsion and shear stress': 5.54+1.82*math.pow(l/s, 4/3) * math.pow(alpha, 1/3),
+                   'Torsion and shear stress': 5.34+1.82*math.pow(l/s, 4/3) * math.pow(alpha, 1/3),  # Table 3-3
                    'Lateral Pressure': 2*(1+math.sqrt(1+alpha))}                      # ψ
             epsilon = {'Axial stress': 0.702*Zl,
                    'Torsion and shear stress': 0.856*math.pow(Zl, 3/4),
@@ -1528,7 +1543,7 @@ class CylinderAndCurvedPlate():
         sjsd_shells = math.sqrt(math.pow(worst_axial_comb,2)-worst_axial_comb*shsd +math.pow(shsd,2)+3*math.pow(tsd,2))
         sxsd_used = worst_axial_comb
         provide_data['sxsd_used'] = sxsd_used
-        sjsd_used = sjsd_panels if self._geometry in [2,6] else sjsd_shells
+        sjsd_used = sjsd_panels if self._geometry in [4, 8] else sjsd_shells  # panels: sigma_j at the panel
         provide_data['sjsd_used'] = sjsd_used
 
         def stress_ratio(stress, fE):
@@ -2097,6 +2112,7 @@ class CylinderAndCurvedPlate():
         self._tQsd= val['tQsd']
         self._psd = val['psd']
         self._shsd = val['shsd']
+        self._cone_additional_shsd = None  # set again by CylStru cone input; otherwise inferred
         
     def get_x_opt(self):
         '''

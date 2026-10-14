@@ -659,7 +659,7 @@ class CylStru():
             tw=None if longitudinal_stiffener is None else longitudinal_stiffener.tw / 1000,
             b=None if longitudinal_stiffener is None else longitudinal_stiffener.b / 1000,
             tf=None if longitudinal_stiffener is None else longitudinal_stiffener.tf / 1000,
-            CylinderAndCurvedPlate=CylinderAndCurvedPlate)
+            CylinderAndCurvedPlate=CylinderAndCurvedPlate, length_unit='m')
 
         self._CylinderMain.sasd = sasd
         self._CylinderMain.smsd = smsd
@@ -747,6 +747,7 @@ class CylStru():
             cone_r2=shell.cone_r2,
             cone_alpha=shell.cone_alpha,
             shell_lenght_l=shell.cone_length,
+            length_unit='m',
         )
         Nsd, M1sd, M2sd, Tsd, Q1sd, Q2sd = forces_with_shsd[:6]
         self.set_conical_forces(Nsd=Nsd, M1sd=M1sd, M2sd=M2sd, Tsd=Tsd, Q1sd=Q1sd, Q2sd=Q2sd, psd=psd)
@@ -818,6 +819,11 @@ class CylStru():
         :return:
         :rtype:
         '''
+        if is_included:
+            warnings.warn('set_end_cap_pressure_included_in_stress(True) means the axial stress input already '
+                          'includes the end-cap pressure (lateral pressure coefficient psi = 4). Earlier versions '
+                          'documented True as "not included" but always used psi = 2; check that this is the '
+                          'intended setting.', UserWarning, stacklevel=2)
         self._CylinderMain.end_cap_pressure_included = is_included
     def set_uls_or_als(self, kind = 'ULS'):
         '''
@@ -859,12 +865,12 @@ class CylStru():
         '''
         Distance between the girders along the cylinder.
 
-        :param val: length/span between girders
+        :param val: length/span between girders (heavy ring frames), L_H in DNV-RP-C202 Figure 3-1 d, mm
         :type val: float
         :return:
         :rtype:
         '''
-        self._CylinderMain.length_between_girders = val
+        self._CylinderMain.length_between_girders = api_helpers.mm_to_m(val)
     def set_panel_spacing(self, val: float = 0):
         '''
         In case a curved panel is selected, not a complete cylinder, this value sets the width of the panel.

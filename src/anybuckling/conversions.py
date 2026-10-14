@@ -9,7 +9,15 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
                                               shell_radius = 0, shell_spacing = 0,
                                               hw = 0, tw = 0, b = 0, tf = 0, CylinderAndCurvedPlate = None,
                                               conical = False, psd = 0, cone_r1 = 0, cone_r2 = 0, cone_alpha = 0,
-                                              shell_lenght_l = 0):
+                                              shell_lenght_l = 0, length_unit = None):
+    '''
+    Convert between shell forces (N, Q in kN; M, T in kNm) and membrane stresses, DNV-RP-C202 Sec 2.2 / 4.2.
+
+    length_unit: 'm' -> geometry in metres, stresses in Pa; 'mm' -> geometry in millimetres, stresses in MPa.
+    None infers the unit from the radius (below 100 means metres), the rule the conical branch already used.
+    Forces scale by 1000 (kN -> N) in both units; moments by 1000 (kNm -> Nm) for metres and by 1e6
+    (kNm -> Nmm) for millimetres.
+    '''
 
     hw = 0 if hw is None else hw
     tw = 0 if tw is None else tw
@@ -29,16 +37,20 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
                                            s=shell_spacing,
                                            t=shell_t)
 
-    # Units: forces in kN, moments in kNm, geometry (shell_radius, shell_t, Itot) in m -> stresses in Pa.
     # DNV-RP-C202 (2.2.2) sa = N/(2 pi r t), (2.2.3) sm = M r/I (= M/(pi r^2 t) for a bare tube),
-    # (2.2.6) tT = T/(2 pi r^2 t), (2.2.7) tQ = Q/(pi r t). kN -> N and kNm -> Nm are both factor 1000.
+    # (2.2.6) tT = T/(2 pi r^2 t), (2.2.7) tQ = Q/(pi r t).
+    if length_unit is None:
+        reference_radius = shell_radius if shell_radius not in [None, 0] else max(abs(cone_r1), abs(cone_r2))
+        length_unit = 'm' if abs(reference_radius) < 100 else 'mm'
+    assert length_unit in ['m', 'mm'], "length_unit must be 'm' or 'mm'"
+    moment_factor = 1000 if length_unit == 'm' else 1e6
     if forces is not None and stresses is None:
         if not conical:
             Nsd, Msd, Tsd, Qsd = forces
             sasd = (Nsd / 2) / (math.pi * shell_radius * eq_thk) * 1000
             smsd = (Msd/ Itot) * \
-                   (shell_radius + shell_t / 2) * 1000
-            tTsd = (Tsd * 1000) / (2 * math.pi * shell_t * math.pow(shell_radius, 2))
+                   (shell_radius + shell_t / 2) * moment_factor
+            tTsd = (Tsd * moment_factor) / (2 * math.pi * shell_t * math.pow(shell_radius, 2))
             tQsd = Qsd / (math.pi * shell_radius * shell_t) * 1000
             shsd = 0
             return sasd, smsd, tTsd, tQsd, shsd
@@ -50,9 +62,9 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
             pressure_factor = 1e6 if max(abs(shell_t), abs(r), abs(shell_lenght_l)) < 100 else 1
             pressure = psd * pressure_factor
             sasd = pressure * r / (2 * te) + Nsd / (2 * math.pi * r * te) * 1000
-            smsd = math.sqrt(math.pow(M1sd, 2) + math.pow(M2sd, 2)) * 1000 / (math.pi * math.pow(r, 2) * te)
+            smsd = math.sqrt(math.pow(M1sd, 2) + math.pow(M2sd, 2)) * moment_factor / (math.pi * math.pow(r, 2) * te)
             shsd = pressure * r / te
-            tTsd = Tsd * 1000 / (2 * math.pi * math.pow(r, 2) * te)
+            tTsd = Tsd * moment_factor / (2 * math.pi * math.pow(r, 2) * te)
             tQsd = math.sqrt(math.pow(Q1sd, 2) + math.pow(Q2sd, 2)) * 1000 / (math.pi * r * te)
             return sasd, smsd, tTsd, tQsd, shsd
 
@@ -60,8 +72,8 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
         if not conical:
             sasd, smsd, tTsd, tQsd, shsd = stresses
             Nsd = (sasd * 2 * math.pi * shell_radius * eq_thk) / 1000
-            Msd = (smsd * Itot) / ((shell_radius + shell_t / 2) * 1000)
-            Tsd = tTsd * 2 * math.pi * shell_t * math.pow(shell_radius, 2) / 1000
+            Msd = (smsd * Itot) / ((shell_radius + shell_t / 2) * moment_factor)
+            Tsd = tTsd * 2 * math.pi * shell_t * math.pow(shell_radius, 2) / moment_factor
             Qsd = tQsd * math.pi * shell_radius * shell_t / 1000
         else:
             r = shell_radius if shell_radius not in [None, 0] else (cone_r1 + cone_r2) / 2
@@ -71,9 +83,9 @@ def helper_cylinder_stress_to_force_to_stress(stresses = None, forces = None, ge
             pressure = psd * pressure_factor
             sasd, smsd, tTsd, tQsd, shsd = stresses
             Nsd = (sasd - pressure * r / (2 * te)) * (2 * math.pi * r * te) / 1000
-            M1sd = smsd * math.pi * math.pow(r, 2) * te / 1000
+            M1sd = smsd * math.pi * math.pow(r, 2) * te / moment_factor
             M2sd = 0
-            Tsd = tTsd * 2 * math.pi * math.pow(r, 2) * te / 1000
+            Tsd = tTsd * 2 * math.pi * math.pow(r, 2) * te / moment_factor
             Q1sd = tQsd * math.pi * r * te / 1000
             Q2sd = 0
             return Nsd, M1sd, M2sd, Tsd, Q1sd, Q2sd, shsd

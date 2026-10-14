@@ -21,7 +21,9 @@ def test_longitudinal_stiffened_shell(cylinder_builder):
     results = cylinder_builder('Longitudinal Stiffened shell').get_buckling_results()
 
     assert results['Unstiffened shell'] == pytest.approx(0.8557206926033175, rel=1e-6)
-    assert results['Longitudinal stiffened shell'] == pytest.approx(0.9701555412318517, rel=1e-6)
+    # Table 3-3 torsion coefficient psi = 5.34 + 1.82 (l/s)^(4/3) alpha_C^(1/3) (DNV-RP-C202 2013 p. 20); the
+    # previous pinned value 0.9701555412318517 came from a 5.54 typo in the code.
+    assert results['Longitudinal stiffened shell'] == pytest.approx(0.9704088282865009, rel=1e-6)
     assert results['Column stability UF'] == pytest.approx(0.6967354898157304, rel=1e-6)
 
 
@@ -29,7 +31,9 @@ def test_orthogonally_stiffened_shell(cylinder_builder):
     results = cylinder_builder('Orthogonally Stiffened shell').get_buckling_results()
 
     assert results['Unstiffened shell'] == pytest.approx(0.8557206926033175, rel=1e-6)
-    assert results['Longitudinal stiffened shell'] == pytest.approx(0.9701555412318517, rel=1e-6)
+    # Table 3-3 torsion coefficient psi = 5.34 + 1.82 (l/s)^(4/3) alpha_C^(1/3) (DNV-RP-C202 2013 p. 20); the
+    # previous pinned value 0.9701555412318517 came from a 5.54 typo in the code.
+    assert results['Longitudinal stiffened shell'] == pytest.approx(0.9704088282865009, rel=1e-6)
     assert results['Heavy ring frame'] == pytest.approx(0.30237783040956595, rel=1e-6)
     assert results['Column stability check'] is True
     assert results['Stiffener check']['longitudinal'] is True
