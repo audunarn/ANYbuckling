@@ -122,6 +122,22 @@ print('  continuity check of code form at 1.25: left=%.4f right=%.4f' % (1 - 0.6
 
 # --------------------------------------------------------------------------------------------
 header('D3  Sec 7.5.2: St. Venant It omits (1 - 0.63 tf/bf) on the flange term (plates.py:651)')
+# README bulb (eta = 1 here, so beta = 1): I_t and f_T with and without the (1 - 0.63 tf/bf) factor
+s, t, l = 680.0, 12.0, 3300.0
+It_code = (hw * tw ** 3 + bf * tf ** 3) / 3
+It_ref = (hw * tw ** 3 + bf * tf ** 3 * (1 - 0.63 * tf / bf)) / 3
+def f_T(It, lT):
+    fet = 1.0 * G_MOD * It / Ipo + math.pi ** 2 * E * (hw + tf / 2) ** 2 * Iz / (Ipo * lT ** 2)
+    lam = math.sqrt(FY / fet)
+    if lam <= 0.6:
+        return FY
+    mu = 0.35 * (lam - 0.6)
+    return FY * (1 + mu + lam ** 2 - math.sqrt((1 + mu + lam ** 2) ** 2 - 4 * lam ** 2)) / (2 * lam ** 2)
+print(f'  README bulb: I_t code={It_code:.4e} mm4 (= {A._Stiffener.get_torsional_moment_venant():.4e} from the package), '
+      f'RP={It_ref:.4e} (+{100 * (It_code / It_ref - 1):.0f}%)')
+for lT in (l, 0.8 * l, 0.4 * l):
+    print(f'    l_T={lT:6.0f}: f_T code={f_T(It_code, lT):6.1f}  RP={f_T(It_ref, lT):6.1f} MPa '
+          f'(+{100 * (f_T(It_code, lT) / f_T(It_ref, lT) - 1):.0f}%)')
 orig = P.Structure.get_torsional_moment_venant
 def It_rp(self, reduced_tw=None, efficient_flange=True):
     tf_ = self._flange_th * 1000
@@ -237,3 +253,12 @@ for y1, y2 in ((200, 0), (0, 200)):
     print(f'  sigma_y1={y1:3d}, sigma_y2={y2:3d}: Z_min={sc.get_dnv_min_section_modulus(200) * 1e9:8.0f} mm3, '
           f't_min={sc.get_dnv_min_thickness(200):.2f} mm  (same stress field, different answer)')
 print(f'  floor used: {15 ** 3} mm3; DNV-OS-C101 floor: 15000 mm3')
+
+header('D12 Structure.get_plasic_section_modulus when the plastic neutral axis lies in the plate (plates.py:501-511)')
+st = P.Structure(dd)
+s_, t_, hw_, tw_, bf_, tf_ = 0.68, 0.025, 0.250297358, 0.012, 0.052, 0.029702642
+a_ = s_ * t_ + hw_ * tw_ + bf_ * tf_
+z_ = a_ / 2 / s_  # PNA depth from plate outer face (inside the plate since a_/2 < s_*t_)
+zp_hand = s_ * z_ ** 2 / 2 + s_ * (t_ - z_) ** 2 / 2 + hw_ * tw_ * (t_ + hw_ / 2 - z_) + bf_ * tf_ * (t_ + hw_ + tf_ / 2 - z_)
+print(f'  tests/example_data.obj_dict: code={st.get_plasic_section_modulus():.4e} m3, hand={zp_hand:.4e} m3 '
+      f'(x{st.get_plasic_section_modulus() / zp_hand:.0f}); tests/test_structure.py::test_plastic_sec_mod pins the code value')
