@@ -822,6 +822,9 @@ class CylinderAndCurvedPlate():
         recomputes from pSd at every radius, so it must not be added again. The origin is recorded when the value
         is assigned through the shsd property (robust to later geometry changes); otherwise it is inferred.
         '''
+        explicit = getattr(self, '_cone_additional_shsd', None)
+        if explicit is not None:
+            return explicit  # set by CylStru.set_conical_forces (0) or set_conical_stresses (user value)
         if not self._shsd:
             return 0.0
         origin = getattr(self, '_cone_shsd_origin', None)

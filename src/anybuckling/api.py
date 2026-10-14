@@ -715,6 +715,8 @@ class CylStru():
         self._CylinderMain.tTsd = abs(governing['tTsd'])
         self._CylinderMain.tQsd = abs(governing['tQsd'])
         self._CylinderMain.shsd = governing['shsd']
+        # Force input: the hoop stress is p*r/te at every radius (4.2.4); there is no additional hoop stress.
+        self._CylinderMain._cone_additional_shsd = 0.0
 
     def set_conical_stresses(self, sasd: float = 0, smsd: float = 0, tTsd: float = 0,
                              tQsd: float = 0, psd: float = 0, shsd: float = 0):
@@ -753,6 +755,8 @@ class CylStru():
         self._CylinderMain.tTsd = abs(api_helpers.mpa_to_pa(tTsd))
         self._CylinderMain.tQsd = abs(api_helpers.mpa_to_pa(tQsd))
         self._CylinderMain.shsd = api_helpers.mpa_to_pa(shsd)
+        # Stress input: shsd is an additional hoop stress on top of p*r/te (4.2.4), as for set_stresses.
+        self._CylinderMain._cone_additional_shsd = api_helpers.mpa_to_pa(shsd)
 
     def set_material(self, mat_yield = 355, emodule = 210000, material_factor = 1.15, poisson = 0.3):
         '''
@@ -800,12 +804,16 @@ class CylStru():
         api_helpers.assert_choice(girder, api_helpers.FABRICATION_METHODS, 'girder fabrication method')
         self._CylinderMain.fab_method_ring_stf = stiffener
         self._CylinderMain.fab_method_ring_girder = girder
-    def set_end_cap_pressure_included_in_stress(self, is_included: bool = True):
+    def set_end_cap_pressure_included_in_stress(self, is_included: bool = False):
         '''
-        Cylinder may or may not have and end cap. If there is an end cap, and the stresses from pressure on this
-        is not included, ste this values to True.
+        State whether the axial stress input already includes the axial stress from pressure on end caps.
 
-        :param is_included: if this is not set, stresses due to end cap pressure for clyinder is set
+        DNV-RP-C202 Table 3-2, notes 1 and 2: if the axial stress does NOT include the end-cap pressure
+        (is_included=False, the default), the hydrostatic pressure coefficient psi = 2 is used, which accounts
+        for the pressure on the shell and the end caps. If it DOES include it (is_included=True), the lateral
+        pressure coefficient psi = 4 is used so that the end-cap effect is not counted twice.
+
+        :param is_included: True if the axial stress input includes the end-cap pressure contribution
         :type is_included: bool
         :return:
         :rtype:

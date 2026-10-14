@@ -432,3 +432,26 @@ def test_c18_ring_effective_width_limited_to_ring_spacing():
     centroid = sum(p[0] * p[1] for p in parts) / area
     I_ring = sum(p[2] + p[0] * (p[1] - centroid) ** 2 for p in parts)
     assert c._CylinderMain.shell_buckling()['cross section data'][1][4] == pytest.approx(I_ring, rel=1e-9)
+
+
+def test_c13_api_flag_follows_its_name_and_defaults_to_hydrostatic():
+    # Default: axial stress excludes end-cap pressure -> hydrostatic psi = 2 (Table 3-2 note 2).
+    # is_included=True: axial stress includes it -> lateral pressure psi = 4 (note 1), no double count.
+    hoop = -0.15 * 6500 / 19
+    default = CylStru(calculation_domain='Unstiffened shell')
+    default.set_material(mat_yield=355, emodule=210000, material_factor=1.15, poisson=0.3)
+    default.set_imperfection()
+    default.set_fabrication_method()
+    default.set_end_cap_pressure_included_in_stress()
+    default.set_uls_or_als()
+    default.set_panel_spacing(val=680)
+    default.set_shell_geometry(radius=6500, thickness=19, tot_length_of_shell=20000, distance_between_rings=3300)
+    default.set_shell_buckling_parmeters()
+    default.set_stresses(psd=-0.15)
+    assert default.get_buckling_results()['Unstiffened shell'] == pytest.approx(
+        hand_cylinder_shell(6500, 19, 3300, sh=hoop, end_cap_in_axial_stress=False)[0], rel=1e-9)
+
+    included = build('Unstiffened shell', endcap=True)
+    included.set_stresses(psd=-0.15)
+    assert included.get_buckling_results()['Unstiffened shell'] == pytest.approx(
+        hand_cylinder_shell(6500, 19, 3300, sh=hoop, end_cap_in_axial_stress=True)[0], rel=1e-9)

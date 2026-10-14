@@ -9,10 +9,10 @@ import pytest
 def test_unstiffened_shell(cylinder_builder):
     results = cylinder_builder('Unstiffened shell').get_buckling_results()
 
-    # Changed by review fix C13: set_end_cap_pressure_included_in_stress(True) now selects the lateral-pressure
-    # coefficient psi = 4 (DNV-RP-C202 Table 3-2, notes 1/2) instead of always psi = 2. Independent hand
-    # calculation (3.4.1)-(3.4.3), (3.2.1)-(3.2.3), (3.1.3): psi = 4 -> 3.347249734791602 (old psi = 2 -> 3.36621049).
-    assert results['Unstiffened shell'] == pytest.approx(3.347249734791602, rel=1e-6)
+    # The fixture uses the default set_end_cap_pressure_included_in_stress() (False: hydrostatic psi = 2,
+    # DNV-RP-C202 Table 3-2 note 2). Independent hand calculation (3.4.1)-(3.4.3), (3.2.1)-(3.2.3), (3.1.3):
+    # psi = 2 -> 3.3662104853009027 (psi = 4, end-cap pressure included in the axial stress -> 3.347249734791602).
+    assert results['Unstiffened shell'] == pytest.approx(3.3662104853009027, rel=1e-6)
     assert results['Longitudinal stiffened shell'] is None
     assert results['Ring stiffened shell'] is None
 
