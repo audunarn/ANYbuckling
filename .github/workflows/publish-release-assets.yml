@@ -44,16 +44,16 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           python tools/verify_release_authority.py \
-            --ledger docs/release/anybuckling-0.1.2-ledger.json \
+            --ledger docs/release/anybuckling-0.1.3-ledger.json \
             --assets release-assets \
             --output dist \
             --tag "$RELEASE_TAG" \
             --protected-ref refs/remotes/origin/main \
-            --expected-terminal ACCEPTED_ANYBUCKLING_0_1_2_RELEASE \
+            --expected-terminal ACCEPTED_ANYBUCKLING_0_1_3_RELEASE \
             --distribution ANYbuckling \
-            --version 0.1.2 \
-            --artifact anybuckling-0.1.2-py3-none-any.whl \
-            --artifact anybuckling-0.1.2.tar.gz
+            --version 0.1.3 \
+            --artifact anybuckling-0.1.3-py3-none-any.whl \
+            --artifact anybuckling-0.1.3.tar.gz
       - name: Publish exact ledger-authorized distributions
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
