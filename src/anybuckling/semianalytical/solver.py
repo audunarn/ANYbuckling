@@ -50,6 +50,12 @@ SUPPORTED_IN_PLANE_SUPPORTS = {
 SUPPORTED_STIFFENER_TYPES = {"T-bar", "L-bulb", "Angle", "Flatbar"}
 SUPPORTED_STIFFENER_BOUNDARIES = {"Cont", "Sniped"}
 SUPPORTED_ROTATIONAL_SUPPORTS = {"SS", "CL", "FS", ""}
+# Rotational support codes are recognised but the U3 Ritz basis is simply
+# supported on every edge: "CL" (clamped) is analysed as simply supported
+# (conservative, reported in diagnostics) and "FS" (free edge) is rejected
+# because a free edge analysed as simply supported is unconservative.
+CLAMPED_ROTATIONAL_SUPPORT = "CL"
+FREE_EDGE_ROTATIONAL_SUPPORT = "FS"
 CSV_SAMPLE_METHOD_FIRST_N = "first-n"
 CSV_SAMPLE_METHOD_STRATIFIED = "stratified-shuffle"
 CSV_SAMPLE_METHOD_FULL = "full"
@@ -123,6 +129,15 @@ class S3PanelInput:
     Geometric dimensions are millimetres and stresses/pressure are MPa.  CSV
     PULS exports use positive in-plane normal stress for compression; the
     helper functions in this module preserve that sign convention.
+
+    Coordinates: x runs along the stiffener (``length``), y across the plate
+    between stiffeners (``stiffener_spacing``).  ``axial_stress`` is the
+    uniform longitudinal stress sigma_x.  ``transverse_stress_1`` and
+    ``transverse_stress_2`` are sigma_y at the two ends of the panel,
+    x = 0 and x = length, varying linearly along the stiffener (DNV-RP-C201
+    Sec 6.8 / Fig 6-6, as in the RP-C201 path of this package).  The elastic
+    buckling driver uses the RP-C201 Sec 6.8 design value; the yield checks
+    use the linear distribution.
     """
 
     length: float
@@ -162,9 +177,22 @@ class U3PanelInput:
     """Input surface for the regular unstiffened U3 plate milestone.
 
     Geometric dimensions are millimetres and stresses/pressure are MPa.  The
-    ANYstructure/PULS exports use two end values for longitudinal and
-    transverse stress; the current U3 Ritz path uses their linear plate-field
-    interpolation in yield checks and their mean values in elastic buckling.
+    ANYstructure/PULS exports use two edge values for the longitudinal and
+    the transverse stress (compression positive).  Coordinates: x along
+    ``length``, y across ``width``.
+
+    * ``axial_stress_1`` / ``axial_stress_2`` are sigma_x at the longitudinal
+      edges y = 0 and y = width: sigma_x varies linearly across the width
+      (in-plane bending, DNV-RP-C201 Sec 6.6 / Fig 6-5, stress ratio psi).
+    * ``transverse_stress_1`` / ``transverse_stress_2`` are sigma_y at the ends
+      x = 0 and x = length: sigma_y varies linearly along the length
+      (DNV-RP-C201 Sec 6.8 / Fig 6-6).
+
+    This is the only orientation that satisfies in-plane equilibrium without
+    shear.  The elastic buckling drivers use the RP-C201 equivalent values
+    (Sec 6.6 k_sigma(psi) for sigma_x, Sec 6.8 for sigma_y); the yield checks
+    use the linear distributions.  ``axial_stress`` and
+    ``mean_transverse_stress`` are the edge means (diagnostics only).
     """
 
     length: float
@@ -270,6 +298,14 @@ class S3SolverConfig:
     high_confidence_drift_limit: float = 0.05
     medium_confidence_drift_limit: float = 0.12
     include_solver_diagnostics: bool = True
+    # Plate buckling under longitudinal compression needs about a/b
+    # half-waves.  With ``auto_mode_count`` the S3 local-plate family and the
+    # U3 plate use longitudinal half-waves 1..max(3, ceil(a/b) + 1) together
+    # with ``longitudinal_modes``; plates wider than long (b > a) also use
+    # transverse half-waves 1..max(2, ceil(b/a) + 1) together with
+    # ``transverse_modes``.  The S3 global families keep the configured tuples.
+    # Set it to False to use exactly the configured mode tuples.
+    auto_mode_count: bool = True
 
 
 @dataclass(frozen=True)
@@ -780,8 +816,13 @@ def _anystructure_rotational_supports(value: Any) -> tuple[str, str]:
     left, right, upper, lower = _anystructure_up_boundary_edges(value)
 
     def paired(first: str, second: str) -> str:
-        if first == second and first in {"CL", "FS"}:
-            return first
+        # A single free edge must not disappear into "SS" (unconservative);
+        # it is carried as "FS", which the U3 validation rejects.  Mixed
+        # clamped/simply supported pairs are analysed as SS (conservative).
+        if FREE_EDGE_ROTATIONAL_SUPPORT in (first, second):
+            return FREE_EDGE_ROTATIONAL_SUPPORT
+        if first == second == CLAMPED_ROTATIONAL_SUPPORT:
+            return CLAMPED_ROTATIONAL_SUPPORT
         return "SS"
 
     return paired(left, right), paired(upper, lower)
@@ -887,41 +928,259 @@ def _anystructure_corrosion_addition_mm(
     return max(float(default_mm), 0.0)
 
 
-def _csr_dimension_mm(value: float | None) -> float | None:
-    parsed = _optional_float(value)
-    if parsed is None:
-        return None
-    if abs(parsed) < EPS:
-        return 0.0
-    return parsed * 1000.0 if abs(parsed) < 10.0 else parsed
+# A stiffener spacing / plate width below this value (mm) cannot occur in a
+# real plate field.  It identifies a duck-typed object whose scantlings are
+# stored in metres (the ANYstructure ``CalcScantlings`` private fields use
+# metres; its public properties return mm).
+_ANYSTRUCTURE_METRE_SCALED_SPACING_LIMIT_MM = 10.0
 
 
 def _anystructure_csr_panel_input(panel: S3PanelInput | U3PanelInput) -> S3PanelInput | U3PanelInput:
-    """Return a CSR-check panel with ANYstructure metre-like dimensions in mm."""
+    """Return the CSR-check panel for the ANYstructure adapters.
+
+    :func:`anystructure_panel_input` already returns millimetres (the
+    ``CalcScantlings`` properties return spacing and scantlings in mm and the
+    span, given in m, is converted), so the panel is used unchanged.  The
+    former per-value rule (multiply every value below 10 by 1000) read common
+    8 mm plates as 8000 mm and made the CSR plate check always pass.
+
+    The only conversion left is for a whole duck-typed object whose spacing is
+    below 10 mm, which is impossible in mm: all of its scantlings are then in
+    metres and are converted together, never value by value.  The length is
+    built from the span in metres by the adapter and is already in mm.
+    """
 
     if isinstance(panel, S3PanelInput):
+        if panel.stiffener_spacing >= _ANYSTRUCTURE_METRE_SCALED_SPACING_LIMIT_MM:
+            return panel
         return replace(
             panel,
-            length=_csr_dimension_mm(panel.length),
-            stiffener_spacing=_csr_dimension_mm(panel.stiffener_spacing),
-            plate_thickness=_csr_dimension_mm(panel.plate_thickness),
-            stiffener_height=_csr_dimension_mm(panel.stiffener_height),
-            web_thickness=_csr_dimension_mm(panel.web_thickness),
-            flange_width=_csr_dimension_mm(panel.flange_width),
-            flange_thickness=_csr_dimension_mm(panel.flange_thickness),
+            stiffener_spacing=panel.stiffener_spacing * 1000.0,
+            plate_thickness=panel.plate_thickness * 1000.0,
+            stiffener_height=panel.stiffener_height * 1000.0,
+            web_thickness=panel.web_thickness * 1000.0,
+            flange_width=panel.flange_width * 1000.0,
+            flange_thickness=panel.flange_thickness * 1000.0,
         )
+    if panel.width >= _ANYSTRUCTURE_METRE_SCALED_SPACING_LIMIT_MM:
+        return panel
     return replace(
         panel,
-        length=_csr_dimension_mm(panel.length),
-        width=_csr_dimension_mm(panel.width),
-        plate_thickness=_csr_dimension_mm(panel.plate_thickness),
+        width=panel.width * 1000.0,
+        plate_thickness=panel.plate_thickness * 1000.0,
     )
 
 
+def _anystructure_csr_requirement(panel: S3PanelInput | U3PanelInput) -> dict[str, Any]:
+    csr_panel = _anystructure_csr_panel_input(panel)
+    requirement = calculate_csr_requirement(csr_panel)
+    if csr_panel is not panel:
+        requirement["notes"] = list(requirement["notes"]) + [
+            "the input object stores its scantlings in metres (spacing below 10 mm); all "
+            "scantlings were converted to mm together for the CSR check"
+        ]
+    return requirement
+
+
 def _anystructure_axial_design_stress(sigma_x1: float, sigma_x2: float) -> float:
+    """Return the single S3 axial stress for same-sign end stresses.
+
+    The reduced S3 input carries one axial stress.  For same-sign ends the end
+    with the larger magnitude governs.  Mixed-sign ends cannot be represented
+    by one value; :func:`_anystructure_axial_end_stresses` returns both ends so
+    that the adapters solve each end and report the envelope.  This helper
+    keeps the compression end for mixed-sign input (the first of those solves).
+    """
+
     if sigma_x1 * sigma_x2 >= 0:
         return sigma_x1 if abs(sigma_x1) > abs(sigma_x2) else sigma_x2
     return max(sigma_x1, sigma_x2)
+
+
+def _anystructure_axial_end_stresses(sigma_x1: float, sigma_x2: float) -> list[tuple[str, float]]:
+    """Return the S3 axial design stress(es) to solve, labelled by end.
+
+    Same-sign ends give the single governing value.  Mixed-sign ends give the
+    compression end and the tension end; neither end alone bounds the other
+    (a large tension end yields before a small compression end buckles), so
+    both are solved and the envelope is reported.
+    """
+
+    if sigma_x1 * sigma_x2 >= 0:
+        return [("single", _anystructure_axial_design_stress(sigma_x1, sigma_x2))]
+    return [
+        ("compression-end", max(sigma_x1, sigma_x2)),
+        ("tension-end", min(sigma_x1, sigma_x2)),
+    ]
+
+
+def _anystructure_load_factor(all_structure: Any, name: str) -> float:
+    """Return an AllStructure load factor, 1.0 when it is missing or unusable."""
+
+    try:
+        value = getattr(all_structure, name)
+    except Exception:
+        return 1.0
+    parsed = _optional_float(value)
+    if parsed is None or not math.isfinite(parsed):
+        return 1.0
+    return parsed
+
+
+def _anystructure_overpressure_side(all_structure: Any) -> str | None:
+    try:
+        value = getattr(all_structure, "_overpressure_side")
+    except Exception:
+        return None
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def anystructure_adapter_diagnostics(calc_object: Any, lat_press: float = 0.0) -> dict[str, Any]:
+    """Return the load-factor / pressure-side record of the ANYstructure adapter.
+
+    The RP-C201 path multiplies every in-plane stress by ``_stress_load_factor``
+    and the lateral pressure by ``_lat_load_factor``; the SemiAnalytical
+    adapter applies the same factors.  The reduced S3/U3 model applies lateral
+    pressure as one fixed load acting on the plate side, so the AllStructure
+    ``_overpressure_side`` setting cannot be represented and is recorded only.
+    """
+
+    all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
+    stress_factor = _anystructure_load_factor(all_structure, "_stress_load_factor")
+    pressure_factor = _anystructure_load_factor(all_structure, "_lat_load_factor")
+    pressure_side = _anystructure_overpressure_side(all_structure)
+    unfactored_kpa = _anystructure_float(lat_press)
+    notes = [
+        "in-plane stresses are multiplied by the AllStructure stress load factor and the lateral "
+        "pressure by the pressure load factor, as in the DNV-RP-C201 path",
+        "lateral pressure is applied on the plate side only: the reduced S3/U3 model has a single "
+        "fixed pressure load and does not evaluate the overpressure side setting",
+    ]
+    if pressure_side is not None and pressure_side.lower() not in {"plate side", "plate"}:
+        notes.append(
+            f"overpressure side '{pressure_side}' is not modelled by SemiAnalytical S3/U3; "
+            "pressure acting on the stiffener side is not checked"
+        )
+    return {
+        "stress_load_factor": stress_factor,
+        "pressure_load_factor": pressure_factor,
+        "unfactored_lateral_pressure_kpa": unfactored_kpa,
+        "design_lateral_pressure_mpa": unfactored_kpa * pressure_factor / 1000.0,
+        "overpressure_side": pressure_side,
+        "pressure_side_modelled": "plate side",
+        "notes": notes,
+    }
+
+
+def anystructure_panel_inputs(
+    calc_object: Any,
+    lat_press: float = 0.0,
+) -> list[tuple[str, S3PanelInput | U3PanelInput]]:
+    """Return every S3/U3 input the ANYstructure adapters must solve.
+
+    One labelled input is returned for U3 panels and for S3 panels with
+    same-sign axial end stresses.  S3 panels with mixed-sign axial end
+    stresses return the compression-end and the tension-end inputs; the
+    adapters report the envelope (maximum usage factor) of both solves.
+    """
+
+    all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
+    plate = getattr(all_structure, "Plate", None)
+    stiffener = getattr(all_structure, "Stiffener", None)
+    if plate is None:
+        return []
+
+    sp_or_up = str(plate.get_puls_sp_or_up()).strip().upper()
+    stress_factor = _anystructure_load_factor(all_structure, "_stress_load_factor")
+    pressure_factor = _anystructure_load_factor(all_structure, "_lat_load_factor")
+    pressure_mpa = _anystructure_float(lat_press) * pressure_factor / 1000.0
+    elastic_modulus = _anystructure_float(getattr(all_structure, "E", None), 210000.0e6) / 1.0e6
+    poisson_ratio = _anystructure_float(getattr(all_structure, "v", None), 0.3)
+    plate_corrosion = _anystructure_corrosion_addition_mm(plate, all_structure)
+
+    if sp_or_up == "SP" and stiffener is not None:
+        puls_boundary = stiffener.get_puls_boundary()
+        in_plane_support = _anystructure_in_plane_support(puls_boundary)
+        stiffener_corrosion = _anystructure_corrosion_addition_mm(stiffener, all_structure)
+        panels: list[tuple[str, S3PanelInput | U3PanelInput]] = []
+        axial_ends = (
+            [("single", 0.0)]
+            if in_plane_support == "Girder - trans"
+            else _anystructure_axial_end_stresses(
+                stiffener.sigma_x1 * stress_factor,
+                stiffener.sigma_x2 * stress_factor,
+            )
+        )
+        for label, sigxd in axial_ends:
+            panels.append(
+                (
+                    label,
+                    S3PanelInput(
+                        length=stiffener.span * 1000.0,
+                        stiffener_spacing=stiffener.spacing,
+                        plate_thickness=stiffener.t,
+                        stiffener_type=_anystructure_stiffener_type(stiffener.get_stiffener_type()),
+                        stiffener_boundary=_anystructure_stiffener_boundary(stiffener.get_puls_stf_end()),
+                        stiffener_height=stiffener.hw,
+                        web_thickness=stiffener.tw,
+                        flange_width=stiffener.b,
+                        flange_thickness=stiffener.tf,
+                        yield_stress_plate=stiffener.mat_yield / 1.0e6,
+                        yield_stress_stiffener=stiffener.mat_yield / 1.0e6,
+                        axial_stress=0.0 if in_plane_support == "Girder - trans" else sigxd,
+                        transverse_stress_1=(
+                            0.0
+                            if in_plane_support == "Girder - long"
+                            else stiffener.sigma_y1 * stress_factor
+                        ),
+                        transverse_stress_2=(
+                            0.0
+                            if in_plane_support == "Girder - long"
+                            else stiffener.sigma_y2 * stress_factor
+                        ),
+                        shear_stress=stiffener.tau_xy * stress_factor,
+                        pressure=pressure_mpa,
+                        in_plane_support=in_plane_support,
+                        elastic_modulus=elastic_modulus,
+                        poisson_ratio=poisson_ratio,
+                        plate_corrosion_addition=plate_corrosion,
+                        web_corrosion_addition=stiffener_corrosion,
+                        flange_corrosion_addition=stiffener_corrosion,
+                    ),
+                )
+            )
+        return panels
+
+    up_boundary = plate.get_puls_up_boundary() if hasattr(plate, "get_puls_up_boundary") else "SSSS"
+    rotational_1, rotational_2 = _anystructure_rotational_supports(up_boundary)
+    puls_boundary = plate.get_puls_boundary() if hasattr(plate, "get_puls_boundary") else "GL"
+    in_plane_support = _anystructure_in_plane_support(puls_boundary)
+    return [
+        (
+            "single",
+            U3PanelInput(
+                length=plate.span * 1000.0,
+                width=plate.spacing,
+                plate_thickness=plate.t,
+                yield_stress_plate=plate.mat_yield / 1.0e6,
+                axial_stress_1=0.0 if in_plane_support == "Girder - trans" else plate.sigma_x1 * stress_factor,
+                axial_stress_2=0.0 if in_plane_support == "Girder - trans" else plate.sigma_x2 * stress_factor,
+                transverse_stress_1=0.0 if in_plane_support == "Girder - long" else plate.sigma_y1 * stress_factor,
+                transverse_stress_2=0.0 if in_plane_support == "Girder - long" else plate.sigma_y2 * stress_factor,
+                shear_stress=plate.tau_xy * stress_factor,
+                pressure=pressure_mpa,
+                in_plane_support=in_plane_support,
+                rotational_support_1=rotational_1,
+                rotational_support_2=rotational_2,
+                elastic_modulus=elastic_modulus,
+                poisson_ratio=poisson_ratio,
+                plate_corrosion_addition=plate_corrosion,
+            ),
+        )
+    ]
 
 
 def anystructure_panel_input(calc_object: Any, lat_press: float = 0.0) -> S3PanelInput | U3PanelInput | None:
@@ -930,71 +1189,117 @@ def anystructure_panel_input(calc_object: Any, lat_press: float = 0.0) -> S3Pane
     This is intentionally duck-typed so ANYstructure can call it without making
     this repository import ANYstructure.  The `lat_press` convention follows
     ANYstructure optimization: kPa in, MPa on the solver input surface.
+    Dimensions are taken in mm (``CalcScantlings`` exposes spacing and
+    scantlings in mm and the span in m).  The AllStructure stress and pressure
+    load factors are applied.  For S3 panels with mixed-sign axial end stresses
+    this returns the compression-end input; :func:`anystructure_panel_inputs`
+    returns both ends, which the SemiAnalytical adapters solve.
     """
 
-    all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
-    plate = getattr(all_structure, "Plate", None)
-    stiffener = getattr(all_structure, "Stiffener", None)
-    if plate is None:
+    panels = anystructure_panel_inputs(calc_object, lat_press)
+    if not panels:
         return None
+    return panels[0][1]
 
-    sp_or_up = str(plate.get_puls_sp_or_up()).strip().upper()
-    pressure_mpa = _anystructure_float(lat_press) / 1000.0
-    elastic_modulus = _anystructure_float(getattr(all_structure, "E", None), 210000.0e6) / 1.0e6
-    poisson_ratio = _anystructure_float(getattr(all_structure, "v", None), 0.3)
-    plate_corrosion = _anystructure_corrosion_addition_mm(plate, all_structure)
 
-    if sp_or_up == "SP" and stiffener is not None:
-        puls_boundary = stiffener.get_puls_boundary()
-        in_plane_support = _anystructure_in_plane_support(puls_boundary)
-        sigxd = _anystructure_axial_design_stress(stiffener.sigma_x1, stiffener.sigma_x2)
-        stiffener_corrosion = _anystructure_corrosion_addition_mm(stiffener, all_structure)
-        return S3PanelInput(
-            length=stiffener.span * 1000.0,
-            stiffener_spacing=stiffener.spacing,
-            plate_thickness=stiffener.t,
-            stiffener_type=_anystructure_stiffener_type(stiffener.get_stiffener_type()),
-            stiffener_boundary=_anystructure_stiffener_boundary(stiffener.get_puls_stf_end()),
-            stiffener_height=stiffener.hw,
-            web_thickness=stiffener.tw,
-            flange_width=stiffener.b,
-            flange_thickness=stiffener.tf,
-            yield_stress_plate=stiffener.mat_yield / 1.0e6,
-            yield_stress_stiffener=stiffener.mat_yield / 1.0e6,
-            axial_stress=0.0 if in_plane_support == "Girder - trans" else sigxd,
-            transverse_stress_1=0.0 if in_plane_support == "Girder - long" else stiffener.sigma_y1,
-            transverse_stress_2=0.0 if in_plane_support == "Girder - long" else stiffener.sigma_y2,
-            shear_stress=stiffener.tau_xy,
-            pressure=pressure_mpa,
-            in_plane_support=in_plane_support,
-            elastic_modulus=elastic_modulus,
-            poisson_ratio=poisson_ratio,
-            plate_corrosion_addition=plate_corrosion,
-            web_corrosion_addition=stiffener_corrosion,
-            flange_corrosion_addition=stiffener_corrosion,
+_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _solve_panel(panel: S3PanelInput | U3PanelInput, config: S3SolverConfig) -> S3Result:
+    return solve_s3_panel(panel, config) if isinstance(panel, S3PanelInput) else solve_u3_panel(panel, config)
+
+
+def _anystructure_envelope_result(
+    solved_ends: Sequence[tuple[str, S3PanelInput | U3PanelInput, S3Result]],
+) -> S3Result:
+    """Combine the per-end solves of a mixed-sign S3 input into one envelope result.
+
+    A single solve is returned unchanged.  For two ends the reported usage
+    factors are the maxima over the ends; the result is valid only when every
+    end is valid (fail closed), and the confidence is the lowest of the ends.
+    """
+
+    if len(solved_ends) == 1:
+        return solved_ends[0][2]
+
+    end_rows = [
+        {
+            "end": label,
+            "axial_stress": getattr(panel, "axial_stress", None),
+            "valid": result.valid,
+            "invalid_reason": result.invalid_reason,
+            "buckling_usage_factor": result.buckling_usage_factor,
+            "ultimate_usage_factor": result.ultimate_usage_factor,
+            "elastic_buckling_usage_factor": result.elastic_buckling_usage_factor,
+            "confidence": result.confidence,
+        }
+        for label, panel, result in solved_ends
+    ]
+    envelope_note = (
+        "mixed-sign axial end stresses: the compression end and the tension end are solved "
+        "separately and the reported usage factors are the envelope (maximum) of both"
+    )
+    invalid = [(label, result) for label, _, result in solved_ends if not result.valid]
+    if invalid:
+        label, result = invalid[0]
+        diagnostics = dict(result.diagnostics)
+        diagnostics["axial_stress_envelope"] = {
+            "ends": end_rows,
+            "invalid_end": label,
+            "note": envelope_note,
+        }
+        return S3Result(
+            buckling_usage_factor=None,
+            ultimate_usage_factor=None,
+            valid=False,
+            elastic_buckling_usage_factor=None,
+            invalid_reason=result.invalid_reason,
+            diagnostics=diagnostics,
+            covered_domain_notes=list(result.covered_domain_notes) + [envelope_note],
+            confidence="low",
+            confidence_reasons=[f"{label}:{reason}" for reason in result.confidence_reasons]
+            or [f"{label}:invalid:{result.invalid_reason}"],
         )
 
-    up_boundary = plate.get_puls_up_boundary() if hasattr(plate, "get_puls_up_boundary") else "SSSS"
-    rotational_1, rotational_2 = _anystructure_rotational_supports(up_boundary)
-    puls_boundary = plate.get_puls_boundary() if hasattr(plate, "get_puls_boundary") else "GL"
-    in_plane_support = _anystructure_in_plane_support(puls_boundary)
-    return U3PanelInput(
-        length=plate.span * 1000.0,
-        width=plate.spacing,
-        plate_thickness=plate.t,
-        yield_stress_plate=plate.mat_yield / 1.0e6,
-        axial_stress_1=0.0 if in_plane_support == "Girder - trans" else plate.sigma_x1,
-        axial_stress_2=0.0 if in_plane_support == "Girder - trans" else plate.sigma_x2,
-        transverse_stress_1=0.0 if in_plane_support == "Girder - long" else plate.sigma_y1,
-        transverse_stress_2=0.0 if in_plane_support == "Girder - long" else plate.sigma_y2,
-        shear_stress=plate.tau_xy,
-        pressure=pressure_mpa,
-        in_plane_support=in_plane_support,
-        rotational_support_1=rotational_1,
-        rotational_support_2=rotational_2,
-        elastic_modulus=elastic_modulus,
-        poisson_ratio=poisson_ratio,
-        plate_corrosion_addition=plate_corrosion,
+    def governing(key: str) -> tuple[str, S3Result]:
+        label, _, result = max(
+            solved_ends,
+            key=lambda item: float(getattr(item[2], key) or 0.0),
+        )
+        return label, result
+
+    buckling_end, buckling_result = governing("buckling_usage_factor")
+    ultimate_end, ultimate_result = governing("ultimate_usage_factor")
+    elastic_values = [
+        float(result.elastic_buckling_usage_factor)
+        for _, _, result in solved_ends
+        if result.elastic_buckling_usage_factor is not None
+    ]
+    confidence = min(
+        (result.confidence for _, _, result in solved_ends),
+        key=lambda value: _CONFIDENCE_RANK.get(value, 0),
+    )
+    confidence_reasons: list[str] = ["axial-stress-envelope:mixed-sign-ends"]
+    for label, _, result in solved_ends:
+        confidence_reasons.extend(f"{label}:{reason}" for reason in result.confidence_reasons)
+    diagnostics = dict(ultimate_result.diagnostics)
+    diagnostics["axial_stress_envelope"] = {
+        "ends": end_rows,
+        "governing_buckling_end": buckling_end,
+        "governing_ultimate_end": ultimate_end,
+        "diagnostics_end": ultimate_end,
+        "note": envelope_note,
+    }
+    return S3Result(
+        buckling_usage_factor=buckling_result.buckling_usage_factor,
+        ultimate_usage_factor=ultimate_result.ultimate_usage_factor,
+        valid=True,
+        elastic_buckling_usage_factor=max(elastic_values) if elastic_values else None,
+        invalid_reason=None,
+        diagnostics=diagnostics,
+        covered_domain_notes=list(ultimate_result.covered_domain_notes) + [envelope_note],
+        confidence=confidence,
+        confidence_reasons=confidence_reasons,
     )
 
 
@@ -1003,13 +1308,18 @@ def solve_anystructure_panel(
     lat_press: float = 0.0,
     config: S3SolverConfig | None = None,
 ) -> dict[str, Any]:
-    """Return an ANYstructure-friendly SemiAnalytical result dictionary."""
+    """Return an ANYstructure-friendly SemiAnalytical result dictionary.
+
+    S3 panels with mixed-sign axial end stresses are solved at both ends and
+    the envelope is reported (see :func:`anystructure_panel_inputs`).
+    """
 
     config = config or S3SolverConfig()
     all_structure = calc_object[0] if isinstance(calc_object, (list, tuple)) else calc_object
     material_factor = _anystructure_material_factor(all_structure)
     acceptance_limit = None if material_factor is None else 1.0 / material_factor
-    panel = anystructure_panel_input(calc_object, lat_press)
+    panels = anystructure_panel_inputs(calc_object, lat_press)
+    panel = panels[0][1] if panels else None
     if panel is None:
         return {
             "panel_family": None,
@@ -1028,8 +1338,14 @@ def solve_anystructure_panel(
         }
 
     panel_family = "S3" if isinstance(panel, S3PanelInput) else "U3"
-    solved = solve_s3_panel(panel, config) if panel_family == "S3" else solve_u3_panel(panel, config)
-    csr_requirement = calculate_csr_requirement(_anystructure_csr_panel_input(panel))
+    solved = _anystructure_envelope_result(
+        [(label, end_panel, _solve_panel(end_panel, config)) for label, end_panel in panels]
+    )
+    solved.diagnostics = {
+        **solved.diagnostics,
+        "anystructure_adapter": anystructure_adapter_diagnostics(calc_object, lat_press),
+    }
+    csr_requirement = _anystructure_csr_requirement(panel)
     valid_prediction = (
         solved.valid
         and solved.buckling_usage_factor is not None
@@ -1077,7 +1393,7 @@ def predict_anystructure_csr_requirement(
             "unknown": [],
         }
         return [0, 0, 0, 0], "red", diagnostics
-    diagnostics = calculate_csr_requirement(_anystructure_csr_panel_input(panel))
+    diagnostics = _anystructure_csr_requirement(panel)
     color = "green" if diagnostics["within_csr_proportions"] else "red"
     return list(diagnostics["csr_vector"]), color, diagnostics
 
@@ -1105,25 +1421,31 @@ def _predict_anystructure_uf_core(
     if fallback_acceptance is None:
         fallback_acceptance = 0.87
     acceptance_limit = fallback_acceptance if material_factor is None else 1.0 / material_factor
-    panel = anystructure_panel_input(calc_object, lat_press)
-    if panel is None:
+    panels = anystructure_panel_inputs(calc_object, lat_press)
+    if not panels:
         return float("inf"), float("inf"), 0.0, acceptance_limit
+    panel = panels[0][1]
 
     fast_config = _anystructure_fast_solver_config(config)
     method = _selected_anystructure_method(calc_object, selected_method)
     cache_key = None
     if cache is not None:
-        cache_key = _anystructure_optimization_cache_key(
-            panel,
-            method,
-            acceptance_limit,
-            fast_config,
+        cache_key = tuple(
+            _anystructure_optimization_cache_key(
+                end_panel,
+                method,
+                acceptance_limit,
+                fast_config,
+            )
+            for _, end_panel in panels
         )
         cached = cache.get(cache_key)
         if cached is not None:
             return float(cached[0]), float(cached[1]), float(cached[2]), float(cached[3])
 
     if method == "buckling" and isinstance(panel, S3PanelInput):
+        # One-way filter on the first (single or compression-end) input: the
+        # envelope buckling usage can only be larger, so a rejection holds.
         prefilter = _s3_buckling_early_reject_vector(
             panel,
             fast_config,
@@ -1139,10 +1461,8 @@ def _predict_anystructure_uf_core(
                 float(prefilter[3]),
             )
 
-    solved = (
-        solve_s3_panel(panel, fast_config)
-        if isinstance(panel, S3PanelInput)
-        else solve_u3_panel(panel, fast_config)
+    solved = _anystructure_envelope_result(
+        [(label, end_panel, _solve_panel(end_panel, fast_config)) for label, end_panel in panels]
     )
     if (
         solved.valid
@@ -1296,6 +1616,7 @@ def _anystructure_optimization_cache_key(
         tuple(config.transverse_modes),
         tuple(config.web_longitudinal_modes),
         tuple(config.web_depth_modes),
+        bool(config.auto_mode_count),
         _hashable_float(config.global_stiffened_strip_capacity_factor),
         _hashable_float(config.s3_shear_buckling_capacity_factor),
     )
@@ -1317,14 +1638,7 @@ def _s3_buckling_early_reject_vector(
     validation_reasons = collect_s3_validation_reasons(panel, config)
     if validation_reasons:
         return np.array([float("inf"), float("inf"), 0.0, float(acceptance_limit)], dtype=float)
-    if all(
-        abs(value) <= EPS
-        for value in (
-            panel.axial_stress,
-            panel.mean_transverse_stress,
-            panel.shear_stress,
-        )
-    ):
+    if not _has_variable_load(panel):
         return np.array([float("inf"), float("inf"), 0.0, float(acceptance_limit)], dtype=float)
 
     section = build_section_properties(panel)
@@ -1368,23 +1682,192 @@ def _s3_buckling_early_reject_vector(
     return None
 
 
-def normalized_load_components(panel: S3PanelInput) -> dict[str, float]:
+def dnv_rp_c201_plate_buckling_coefficient(psi: float) -> float | None:
+    """Return k_sigma(psi) of DNV-RP-C201 (Oct 2010) Sec 6.6 for an internal plate.
+
+    ``psi = sigma_2 / sigma_1`` with sigma_1 the larger compressive edge
+    stress.  The standard covers -2 <= psi <= 1; ``None`` outside.
+    """
+
+    if 0.0 <= psi <= 1.0:
+        return 8.2 / (1.05 + psi)
+    if -1.0 <= psi < 0.0:
+        return 7.81 - 6.29 * psi + 9.78 * psi * psi
+    if -2.0 <= psi < -1.0:
+        return 5.98 * (1.0 - psi) ** 2
+    return None
+
+
+def _uniform_compression_plate_coefficient(loaded_length: float, width: float) -> float:
+    """Return the classical SS plate coefficient k = min_m (m b / a + a / (m b))^2."""
+
+    alpha = loaded_length / max(width, EPS)
+    if not math.isfinite(alpha) or alpha <= EPS:
+        return 4.0
+    lower = max(1, int(math.floor(alpha)))
+    return min((m / alpha + alpha / m) ** 2 for m in (lower, lower + 1))
+
+
+def _axial_edge_stresses(panel: S3PanelInput | U3PanelInput) -> tuple[float, float]:
+    if isinstance(panel, U3PanelInput):
+        return panel.axial_stress_1, panel.axial_stress_2
+    return panel.axial_stress, panel.axial_stress
+
+
+def _has_variable_load(panel: S3PanelInput | U3PanelInput) -> bool:
+    """Return True when any proportional in-plane stress component is nonzero."""
+
+    return any(
+        abs(value) > EPS
+        for value in (
+            *_axial_edge_stresses(panel),
+            panel.transverse_stress_1,
+            panel.transverse_stress_2,
+            panel.shear_stress,
+        )
+    )
+
+
+def axial_buckling_driver(panel: S3PanelInput | U3PanelInput) -> dict[str, Any]:
+    """Return the longitudinal compression that drives elastic plate buckling.
+
+    S3 carries one uniform axial stress.  For U3 sigma_x varies linearly across
+    the plate width (``axial_stress_1`` at y = 0, ``axial_stress_2`` at
+    y = width).  The elastic analysis keeps a uniform geometric stress, so a
+    gradient enters as the equivalent uniform compression of DNV-RP-C201
+    Sec 6.6: sigma_x,eq = 4 sigma_1 / k_sigma(psi), which gives the RP-C201
+    critical stress k_sigma(psi) pi^2 D / (b^2 t) in the k = 4 basis of a long
+    plate.
+
+    The Ritz plate factor carries the uniform-compression aspect-ratio
+    coefficient k(a/b) = min_m (m b/a + a/(m b))^2 >= 4.  That coefficient is
+    exact for uniform compression but not for gradients: against an exact Ritz
+    solution with the linear distribution, 4 sigma_1 / k_sigma(psi) alone is
+    up to 12 % unconservative at a/b = sqrt(2) (psi = -1) and 46-108 % for
+    plates wider than long (a/b <= 0.5, psi <= -1).  The equivalent stress is
+    therefore multiplied by g = 1 + (k(a/b) / 4 - 1) min(1, (1 - psi) / 2):
+    (1 - psi) / 2 is the in-plane bending share of the edge stress, so the
+    uniform part keeps the aspect-ratio coefficient and the bending part does
+    not.  g = 1 at psi = 1 (uniform compression exact) and for integer
+    a/b >= 1, g = k(a/b) / 4 for psi <= -1 (the RP-C201 long-plate critical
+    stress k_sigma(psi) sigma_E), it is continuous in psi and never makes the
+    result less conservative than 4 sigma_1 / k_sigma(psi).  Against the exact
+    Ritz solution the result stays within the accuracy of the RP-C201
+    k_sigma fit (<= +0.6 % for 0.4 <= a/b <= 5, -2 <= psi <= 1).
+
+    Psi below -2 is outside RP-C201 Sec 6.6 and returns ``valid = False``.
+    Both edges in tension give no buckling driver (stress 0).
+    """
+
+    first, second = _axial_edge_stresses(panel)
+    sigma_1 = max(first, second)
+    sigma_2 = min(first, second)
+    summary: dict[str, Any] = {
+        "edge_stresses": [first, second],
+        "sigma_1": sigma_1,
+        "psi": None,
+        "k_sigma": None,
+        "aspect_ratio_correction": 1.0,
+        "stress": 0.0,
+        "valid": True,
+        "basis": "uniform",
+    }
+    if sigma_1 <= EPS:
+        summary["basis"] = "no-compression"
+        return summary
+    if abs(sigma_1 - sigma_2) <= 1.0e-12 * max(abs(sigma_1), 1.0):
+        summary.update({"psi": 1.0, "k_sigma": 4.0, "stress": sigma_1})
+        return summary
+    psi = sigma_2 / sigma_1
+    k_sigma = dnv_rp_c201_plate_buckling_coefficient(psi)
+    summary["psi"] = psi
+    if k_sigma is None:
+        summary.update({"stress": None, "valid": False, "basis": "outside-dnv-rp-c201-6.6"})
+        return summary
+    k_uniform = _uniform_compression_plate_coefficient(panel.length, panel.width)
+    correction = 1.0 + (k_uniform / 4.0 - 1.0) * min(1.0, 0.5 * (1.0 - psi))
+    summary.update(
+        {
+            "k_sigma": k_sigma,
+            "uniform_compression_coefficient": k_uniform,
+            "aspect_ratio_correction": correction,
+            "stress": 4.0 * sigma_1 / k_sigma * correction,
+            "basis": "dnv-rp-c201-6.6-equivalent-uniform",
+        }
+    )
+    return summary
+
+
+def transverse_buckling_driver(panel: S3PanelInput | U3PanelInput) -> dict[str, Any]:
+    """Return the transverse compression that drives elastic buckling.
+
+    sigma_y varies linearly along the length (``transverse_stress_1`` at
+    x = 0, ``transverse_stress_2`` at x = length).  DNV-RP-C201 Sec 6.8: use
+    the stress at l1 = min(0.25 l, 0.5 s) from the most stressed end, but not
+    less than 0.75 of the maximum.  Here l is the panel length and s the
+    plate width (stiffener spacing for S3).  Both ends in tension give no
+    driver.
+    """
+
+    first, second = panel.transverse_stress_1, panel.transverse_stress_2
+    sigma_max = max(first, second)
+    sigma_min = min(first, second)
+    summary: dict[str, Any] = {
+        "end_stresses": [first, second],
+        "sigma_max": sigma_max,
+        "l1": None,
+        "stress_at_l1": None,
+        "stress": 0.0,
+        "basis": "uniform",
+    }
+    if sigma_max <= EPS:
+        summary["basis"] = "no-compression"
+        return summary
+    if abs(sigma_max - sigma_min) <= 1.0e-12 * max(abs(sigma_max), 1.0):
+        summary["stress"] = sigma_max
+        return summary
+    length = max(panel.length, EPS)
+    l1 = min(0.25 * length, 0.5 * panel.width)
+    stress_at_l1 = sigma_max + (sigma_min - sigma_max) * l1 / length
+    summary.update(
+        {
+            "l1": l1,
+            "stress_at_l1": stress_at_l1,
+            "stress": max(stress_at_l1, 0.75 * sigma_max),
+            "basis": "dnv-rp-c201-6.8",
+        }
+    )
+    return summary
+
+
+def normalized_load_components(panel: S3PanelInput | U3PanelInput) -> dict[str, Any]:
     """Return stress resultants and destabilizing load components.
 
     Positive values in the `compression_*` fields are compression resultants
-    per unit length.  Negative normal stresses still enter the yield checks
-    with their signed values, but are not treated as elastic buckling drivers.
+    per unit length, built from the buckling drivers of
+    :func:`axial_buckling_driver` and :func:`transverse_buckling_driver`.
+    Negative normal stresses still enter the yield checks with their signed
+    (linearly varying) values, but are not treated as elastic buckling
+    drivers.  The ``signed_*`` normal stresses are edge means (diagnostics).
     """
 
     plate_t = panel.plate_thickness
+    axial = axial_buckling_driver(panel)
+    transverse = transverse_buckling_driver(panel)
+    axial_stress = float(axial["stress"] or 0.0)
+    transverse_stress = float(transverse["stress"] or 0.0)
     return {
         "signed_axial_stress": panel.axial_stress,
         "signed_transverse_stress": panel.mean_transverse_stress,
         "signed_shear_stress": panel.shear_stress,
-        "compression_nx": max(panel.axial_stress, 0.0) * plate_t,
-        "compression_ny": max(panel.mean_transverse_stress, 0.0) * plate_t,
+        "buckling_axial_stress": axial_stress,
+        "buckling_transverse_stress": transverse_stress,
+        "compression_nx": max(axial_stress, 0.0) * plate_t,
+        "compression_ny": max(transverse_stress, 0.0) * plate_t,
         "shear_nxy": abs(panel.shear_stress) * plate_t,
         "pressure": max(panel.pressure, 0.0),
+        "axial_driver": axial,
+        "transverse_driver": transverse,
     }
 
 
@@ -1463,7 +1946,9 @@ def effective_stiffener_plate_width(panel: S3PanelInput) -> dict[str, float]:
     )
     length_ratio = effective_length / max(panel.width, EPS)
     if length_ratio >= 1.0:
-        coefficient = 1.12 / (1.0 + 1.75 * length_ratio**1.6)
+        # IACS/CSR shear-lag coefficient 1.12 / (1 + 1.75 (l_eff / s)^-1.6):
+        # it rises towards 1 for long stiffeners.
+        coefficient = 1.12 / (1.0 + 1.75 * length_ratio**-1.6)
         coefficient = min(coefficient, 1.0)
     else:
         coefficient = 0.407 * length_ratio
@@ -1589,6 +2074,35 @@ def _with_longitudinal_stiffness_scale(
     )
 
 
+def _support_model_notes(panel: S3PanelInput | U3PanelInput) -> list[str]:
+    """Return notes for support settings that are accepted but not modelled."""
+
+    notes: list[str] = []
+    if panel.in_plane_support in {"Girder - long", "Girder - trans"}:
+        notes.append(
+            f"in-plane support '{panel.in_plane_support}' is not represented in the reduced "
+            "mechanics: for the same stresses the result equals 'Integrated' (the ANYstructure "
+            "adapter only removes the transverse stress for 'Girder - long' and the axial stress "
+            "for 'Girder - trans')"
+        )
+    if isinstance(panel, U3PanelInput):
+        clamped = [
+            name
+            for name, value in (
+                ("x_edges", panel.rotational_support_1),
+                ("y_edges", panel.rotational_support_2),
+            )
+            if value == CLAMPED_ROTATIONAL_SUPPORT
+        ]
+        if clamped:
+            notes.append(
+                "rotational support 'CL' ("
+                + ", ".join(clamped)
+                + ") is analysed as simply supported, which is conservative"
+            )
+    return notes
+
+
 def _support_membrane_factor(panel: S3PanelInput) -> float:
     if panel.in_plane_support == "Integrated":
         return 1.0
@@ -1601,13 +2115,15 @@ def _support_membrane_factor(panel: S3PanelInput) -> float:
 
 def _load_family(panel: S3PanelInput | U3PanelInput) -> str:
     components = []
-    if panel.axial_stress > EPS:
+    axial_edges = _axial_edge_stresses(panel)
+    transverse_ends = (panel.transverse_stress_1, panel.transverse_stress_2)
+    if max(axial_edges) > EPS:
         components.append("axial-compression")
-    elif panel.axial_stress < -EPS:
+    elif min(axial_edges) < -EPS:
         components.append("axial-tension")
-    if panel.mean_transverse_stress > EPS:
+    if max(transverse_ends) > EPS:
         components.append("transverse-compression")
-    elif panel.mean_transverse_stress < -EPS:
+    elif min(transverse_ends) < -EPS:
         components.append("transverse-tension")
     if abs(panel.shear_stress) > EPS:
         components.append("shear")
@@ -2101,6 +2617,14 @@ def collect_u3_validation_reasons(panel: U3PanelInput, config: S3SolverConfig) -
         reasons.append("unsupported-rotational-support")
     if panel.rotational_support_2 not in SUPPORTED_ROTATIONAL_SUPPORTS:
         reasons.append("unsupported-rotational-support")
+    if FREE_EDGE_ROTATIONAL_SUPPORT in (panel.rotational_support_1, panel.rotational_support_2):
+        # The U3 Ritz basis is simply supported on all four edges; a free edge
+        # analysed as simply supported is unconservative, so it fails closed.
+        reasons.append("unsupported-rotational-support-free-edge")
+    if not axial_buckling_driver(panel)["valid"]:
+        # Stress ratio psi < -2 across the width is outside DNV-RP-C201
+        # Sec 6.6, which defines the equivalent buckling driver.
+        reasons.append("unsupported-axial-stress-gradient")
     if panel.width > EPS:
         aspect_ratio = panel.length / panel.width
         if aspect_ratio < config.min_aspect_ratio or aspect_ratio > config.max_aspect_ratio:
@@ -2153,7 +2677,7 @@ def _mode_linear_terms(
     # stiffener axial force is destabilizing for the global mode.  Transverse
     # and shear loads are carried by the plating alone.
     axial_resultant = (
-        max(loads["signed_axial_stress"], 0.0) * stiffness.membrane_thickness
+        max(loads["buckling_axial_stress"], 0.0) * stiffness.membrane_thickness
     )
     geometric = (
         axial_resultant * kx * kx
@@ -2740,6 +3264,64 @@ def _local_pressure_imperfection(panel: S3PanelInput) -> float:
     )
 
 
+def _auto_half_wave_count(loaded_length: float, other_length: float, minimum: int) -> int:
+    """Return max(minimum, ceil(loaded_length / other_length) + 1)."""
+
+    ratio = loaded_length / max(other_length, EPS)
+    if not math.isfinite(ratio):
+        return minimum
+    # The small offset keeps exact integer ratios (e.g. 4000 / 1000) from
+    # rounding up through floating-point noise.
+    return max(minimum, int(math.ceil(ratio - 1.0e-9)) + 1)
+
+
+def _merged_mode_tuple(configured: Sequence[int], count: int) -> tuple[int, ...]:
+    return tuple(sorted(set(int(value) for value in configured) | set(range(1, count + 1))))
+
+
+def plate_mode_tuples(
+    panel: S3PanelInput | U3PanelInput,
+    config: S3SolverConfig,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Return the (longitudinal, transverse) half-waves of the plate family.
+
+    This is the S3 local-plate family (a = length, b = stiffener spacing) or
+    the U3 plate.  With ``config.auto_mode_count`` the configured tuples are
+    extended so that the basis contains about a/b longitudinal half-waves
+    (S1 of the calculation review: a fixed m <= 3 basis is up to +352 %
+    unconservative at a/b = 12) and, for plates wider than long (b > a),
+    about b/a transverse half-waves.
+    """
+
+    longitudinal = tuple(config.longitudinal_modes)
+    transverse = tuple(config.transverse_modes)
+    if not config.auto_mode_count:
+        return longitudinal, transverse
+    longitudinal = _merged_mode_tuple(
+        longitudinal,
+        _auto_half_wave_count(panel.length, panel.width, 3),
+    )
+    if panel.width > panel.length:
+        transverse = _merged_mode_tuple(
+            transverse,
+            _auto_half_wave_count(panel.width, panel.length, 2),
+        )
+    return longitudinal, transverse
+
+
+def _ritz_basis_summary(panel: S3PanelInput | U3PanelInput, config: S3SolverConfig) -> dict[str, Any]:
+    longitudinal, transverse = plate_mode_tuples(panel, config)
+    summary: dict[str, Any] = {
+        "auto_mode_count": config.auto_mode_count,
+        "plate_longitudinal_modes": list(longitudinal),
+        "plate_transverse_modes": list(transverse),
+    }
+    if isinstance(panel, S3PanelInput):
+        summary["global_longitudinal_modes"] = list(config.longitudinal_modes)
+        summary["global_transverse_modes"] = list(config.transverse_modes)
+    return summary
+
+
 def build_ritz_modes(
     panel: S3PanelInput,
     section: S3SectionProperties,
@@ -2752,6 +3334,7 @@ def build_ritz_modes(
         if config.use_separate_s3_pressure_modes
         else config.pressure_global_share
     )
+    local_longitudinal_modes, local_transverse_modes = plate_mode_tuples(panel, config)
     for family, pressure_share in (
         ("local", config.pressure_local_share),
         ("global", global_pressure_share),
@@ -2759,8 +3342,13 @@ def build_ritz_modes(
         stiffness = build_orthotropic_stiffness(panel, section, family, config)
         if family == "global":
             stiffness = _with_longitudinal_stiffness_scale(stiffness, global_stiffness_scale)
-        for m in config.longitudinal_modes:
-            for n in config.transverse_modes:
+            longitudinal_modes = tuple(config.longitudinal_modes)
+            transverse_modes = tuple(config.transverse_modes)
+        else:
+            longitudinal_modes = local_longitudinal_modes
+            transverse_modes = local_transverse_modes
+        for m in longitudinal_modes:
+            for n in transverse_modes:
                 kx, ky, linear, geometric, nonlinear = _mode_linear_terms(
                     panel,
                     stiffness,
@@ -2829,7 +3417,8 @@ def build_ritz_modes(
     )
     cylinder_area_factor = panel.length * panel.width / 2.0
     cylinder_axial_resultant = (
-        max(panel.axial_stress, 0.0) * cylindrical_stiffness.membrane_thickness
+        max(float(axial_buckling_driver(panel)["stress"] or 0.0), 0.0)
+        * cylindrical_stiffness.membrane_thickness
     )
     for m in config.longitudinal_modes:
         kx = m * math.pi / panel.length
@@ -2893,8 +3482,9 @@ def build_u3_ritz_modes(panel: U3PanelInput, config: S3SolverConfig) -> list[Rit
 
     modes: list[RitzMode] = []
     stiffness = _isotropic_plate_stiffness(panel)
-    for m in config.longitudinal_modes:
-        for n in config.transverse_modes:
+    longitudinal_modes, transverse_modes = plate_mode_tuples(panel, config)
+    for m in longitudinal_modes:
+        for n in transverse_modes:
             kx, ky, linear, geometric, nonlinear = _mode_linear_terms(
                 panel,
                 stiffness,
@@ -3240,8 +3830,9 @@ def _stiffener_column_factor(
 
     config = config or S3SolverConfig()
     stiffness = build_orthotropic_stiffness(panel, section, "global", config)
-    axial_resultant = max(panel.axial_stress, 0.0) * stiffness.membrane_thickness
-    transverse_resultant = max(panel.mean_transverse_stress, 0.0) * panel.plate_thickness
+    loads = normalized_load_components(panel)
+    axial_resultant = max(loads["buckling_axial_stress"], 0.0) * stiffness.membrane_thickness
+    transverse_resultant = loads["compression_ny"]
     if axial_resultant <= EPS and transverse_resultant <= EPS:
         return None
 
@@ -4397,6 +4988,115 @@ def solve_equilibrium_amplitudes(
     )
 
 
+GLOBAL_STABILITY_FAMILIES = ("global", "global-cylindrical")
+GLOBAL_STABILITY_SHARE = 0.5
+
+
+def _continuation_tangent(
+    runtime: RitzRuntime,
+    amplitudes: Sequence[float],
+    load_factor: float,
+) -> np.ndarray:
+    """Return the equilibrium tangent stiffness at a converged continuation state."""
+
+    q = np.asarray(amplitudes, dtype=float)
+    tangent = runtime.linear - load_factor * runtime.geometric
+    if runtime.membrane is not None:
+        total_deflection = q + runtime.imperfection
+        membrane_amplitudes = _membrane_amplitudes(runtime.membrane, total_deflection)
+        return tangent + _membrane_tangent(runtime.membrane, total_deflection, membrane_amplitudes)
+    tangent = tangent.copy()
+    tangent.flat[:: len(q) + 1] += 3.0 * runtime.nonlinear * q * q
+    return tangent
+
+
+def _scaled_tangent(tangent: np.ndarray, runtime: RitzRuntime) -> np.ndarray:
+    # Congruent scaling with the load-independent linear stiffness keeps the
+    # inertia (Sylvester) and makes the smallest eigenvalue roughly linear in
+    # the load factor near an elastic instability (1 - lambda / lambda_E for an
+    # uncoupled mode), so it can be interpolated between load steps.
+    diagonal = np.abs(np.diagonal(runtime.linear))
+    scale = 1.0 / np.sqrt(np.maximum(diagonal, EPS))
+    return tangent * scale[:, None] * scale[None, :]
+
+
+def _continuation_stability_loss(
+    modes: Sequence[RitzMode],
+    runtime: RitzRuntime,
+    amplitudes: Sequence[float],
+    load_factor: float,
+    previous_modes: Sequence[RitzMode],
+    previous_runtime: RitzRuntime,
+    previous_amplitudes: Sequence[float],
+    previous_load: float,
+) -> dict[str, Any] | None:
+    """Return a global loss-of-stability record for an accepted step, or None.
+
+    A converged state whose tangent stiffness is not positive definite lies on
+    an unstable branch.  Only an unstable direction dominated by the global
+    stiffener/plate families counts: column-type global buckling has no
+    post-buckling reserve, whereas a local plate mode change (mode jumping)
+    is not a collapse.  The instability load is interpolated from the lowest
+    scaled tangent eigenvalue of the last stable step.
+    """
+
+    scaled = _scaled_tangent(_continuation_tangent(runtime, amplitudes, load_factor), runtime)
+    if _is_positive_definite(scaled):
+        return None
+    current = _lowest_tangent_mode(modes, scaled)
+    if current["global_share"] < GLOBAL_STABILITY_SHARE:
+        return None
+    previous = _lowest_tangent_mode(
+        previous_modes,
+        _scaled_tangent(
+            _continuation_tangent(previous_runtime, previous_amplitudes, previous_load),
+            previous_runtime,
+        ),
+    )
+    upper = float(current["eigenvalue"])
+    lower = float(previous["eigenvalue"])
+    if lower > 0.0 and upper < 0.0:
+        estimate = previous_load + (load_factor - previous_load) * lower / (lower - upper)
+    else:
+        estimate = previous_load
+    return {
+        "load_factor": estimate,
+        "last_stable_load_factor": previous_load,
+        "first_unstable_load_factor": load_factor,
+        "lowest_scaled_eigenvalue": upper,
+        "previous_lowest_scaled_eigenvalue": lower,
+        "global_share": current["global_share"],
+        "dominant_mode": current["dominant_mode"],
+    }
+
+
+def _is_positive_definite(matrix: np.ndarray) -> bool:
+    try:
+        np.linalg.cholesky(0.5 * (matrix + matrix.T))
+    except np.linalg.LinAlgError:
+        return False
+    return True
+
+
+def _lowest_tangent_mode(
+    modes: Sequence[RitzMode],
+    scaled_tangent: np.ndarray,
+) -> dict[str, Any]:
+    eigenvalues, eigenvectors = np.linalg.eigh(0.5 * (scaled_tangent + scaled_tangent.T))
+    vector = eigenvectors[:, 0]
+    weights = vector * vector
+    total = float(np.sum(weights))
+    global_share = float(
+        sum(weight for mode, weight in zip(modes, weights) if mode.family in GLOBAL_STABILITY_FAMILIES)
+    ) / max(total, EPS)
+    dominant = int(np.argmax(weights))
+    return {
+        "eigenvalue": float(eigenvalues[0]),
+        "global_share": global_share,
+        "dominant_mode": modes[dominant].label if modes else None,
+    }
+
+
 def _mode_amplitude_summary(
     modes: Sequence[RitzMode],
     amplitudes: Sequence[float],
@@ -4715,30 +5415,68 @@ def _plate_yield_ratio(
 
     field = _plate_membrane_field(panel, modes, config, runtime)
     if field is None:
-        vm = _stress_von_mises(
-            load_factor * panel.axial_stress,
-            load_factor * panel.mean_transverse_stress,
-            load_factor * panel.shear_stress,
-        )
-        return vm / max(panel.yield_stress_plate, EPS)
+        return _first_order_von_mises_ratio(panel, load_factor, config)
 
     total_deflection = np.asarray(amplitudes, dtype=float) + np.asarray(
         [mode.imperfection for mode in modes], dtype=float
     )
     membrane_amplitudes = _membrane_amplitudes(field, total_deflection)
     sigma_x2, sigma_y2, tau2 = _membrane_stress_components(field, membrane_amplitudes)
-    sigma_x = load_factor * panel.axial_stress + sigma_x2
-    sigma_y = (
-        load_factor
-        * (
-            panel.transverse_stress_1
-            + (panel.transverse_stress_2 - panel.transverse_stress_1)
-            * field.grid_y_fractions
-        )
-        + sigma_y2
+    sigma_x1, sigma_y1 = applied_plate_stress_field(
+        panel,
+        field.grid_x_fractions,
+        field.grid_y_fractions,
     )
+    sigma_x = load_factor * sigma_x1 + sigma_x2
+    sigma_y = load_factor * sigma_y1 + sigma_y2
     tau = load_factor * panel.shear_stress + tau2
     return _max_von_mises_ratio(sigma_x, sigma_y, tau, panel.yield_stress_plate)
+
+
+def applied_plate_stress_field(
+    panel: S3PanelInput | U3PanelInput,
+    x_fractions: np.ndarray,
+    y_fractions: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return the applied (first-order) sigma_x, sigma_y at unit load factor.
+
+    The linear distributions follow the input definitions (and DNV-RP-C201
+    Figs 6-5 and 6-6): sigma_y varies along the length (x), from
+    ``transverse_stress_1`` at x = 0 to ``transverse_stress_2`` at x = length;
+    for U3 sigma_x varies across the width (y), from ``axial_stress_1`` at
+    y = 0 to ``axial_stress_2`` at y = width.  S3 sigma_x is uniform.  Each
+    normal stress therefore varies only transverse to its own direction,
+    which satisfies in-plane equilibrium without shear.
+    """
+
+    x_fractions = np.asarray(x_fractions, dtype=float)
+    y_fractions = np.asarray(y_fractions, dtype=float)
+    first, second = _axial_edge_stresses(panel)
+    sigma_x = first + (second - first) * y_fractions
+    sigma_y = panel.transverse_stress_1 + (
+        panel.transverse_stress_2 - panel.transverse_stress_1
+    ) * x_fractions
+    return sigma_x, sigma_y
+
+
+def _first_order_von_mises_ratio(
+    panel: S3PanelInput | U3PanelInput,
+    load_factor: float,
+    config: S3SolverConfig,
+) -> float:
+    """Return the first-order plate von Mises ratio over the hot-spot grid."""
+
+    fractions = np.asarray(config.membrane_hot_spot_fractions, dtype=float)
+    grid_x = np.repeat(fractions, len(fractions))
+    grid_y = np.tile(fractions, len(fractions))
+    sigma_x, sigma_y = applied_plate_stress_field(panel, grid_x, grid_y)
+    tau = np.full_like(sigma_x, panel.shear_stress)
+    return _max_von_mises_ratio(
+        load_factor * sigma_x,
+        load_factor * sigma_y,
+        load_factor * tau,
+        panel.yield_stress_plate,
+    )
 
 
 def _u3_plate_yield_ratio(
@@ -4751,43 +5489,12 @@ def _u3_plate_yield_ratio(
 ) -> float:
     """Return the redistributed membrane stress control ratio for the plate.
 
-    Same membrane-stress limit-state form as the S3 plate criterion, with the
-    linearly varying axial stress interpolated along the plate length.
+    Same membrane-stress limit-state form as the S3 plate criterion; sigma_x
+    varies linearly across the width and sigma_y along the length (see
+    :func:`applied_plate_stress_field`).
     """
 
-    field = _plate_membrane_field(panel, modes, config, runtime)
-    if field is None:
-        vm = _stress_von_mises(
-            load_factor * panel.axial_stress,
-            load_factor * panel.mean_transverse_stress,
-            load_factor * panel.shear_stress,
-        )
-        return vm / max(panel.yield_stress_plate, EPS)
-
-    total_deflection = np.asarray(amplitudes, dtype=float) + np.asarray(
-        [mode.imperfection for mode in modes], dtype=float
-    )
-    membrane_amplitudes = _membrane_amplitudes(field, total_deflection)
-    sigma_x2, sigma_y2, tau2 = _membrane_stress_components(field, membrane_amplitudes)
-    sigma_x = (
-        load_factor
-        * (
-            panel.axial_stress_1
-            + (panel.axial_stress_2 - panel.axial_stress_1) * field.grid_x_fractions
-        )
-        + sigma_x2
-    )
-    sigma_y = (
-        load_factor
-        * (
-            panel.transverse_stress_1
-            + (panel.transverse_stress_2 - panel.transverse_stress_1)
-            * field.grid_y_fractions
-        )
-        + sigma_y2
-    )
-    tau = load_factor * panel.shear_stress + tau2
-    return _max_von_mises_ratio(sigma_x, sigma_y, tau, panel.yield_stress_plate)
+    return _plate_yield_ratio(panel, modes, amplitudes, load_factor, config, runtime)
 
 
 def u3_yield_utilization(
@@ -5147,6 +5854,8 @@ def _notes() -> list[str]:
         "web-local compression-shear uses a reduced stiffener-section web-edge compression envelope and a reduced local plate-web interaction; torsional stiffener remains a reduced gross-section estimate",
         "stiffener yield exposes SI/PI section branches, lateral-deformation and sniped bending, SI-only torsional stress, and effective attached plate width",
         "global longitudinal strip stiffness degrades from local elastic utilization on the nonlinear load path",
+        "ultimate capacity is capped at the column-type global elastic buckling factor (no post-buckling reserve for global column buckling) and is never lifted to the elastic envelope",
+        "transverse stress varies linearly along the stiffener in the yield checks; elastic buckling uses the DNV-RP-C201 Sec 6.8 design value; the local plate Ritz basis adapts to the aspect ratio",
         "PULS user manual S3 limits are reported as diagnostics; covered-domain gates remain controlled by solver config",
     ]
 
@@ -5158,7 +5867,8 @@ def _u3_notes() -> list[str]:
         "Rayleigh-Ritz sine modes use an isotropic plate basis with simply-supported trigonometric shapes",
         "buckling usage is the reduced buckling-strength envelope over first-yield capacity and elastic plate/shear buckling limits",
         "plate limit state uses redistributed membrane stresses from the exact Marguerre/Airy solution; through-thickness plate bending is excluded per the PULS limit-state definition, while the manual clamped-strip pressure limit gates lateral pressure",
-        "U3 end stresses are interpolated in yield checks and averaged in elastic buckling checks",
+        "U3 edge stresses vary linearly in the yield checks (sigma_x across the width, sigma_y along the length); elastic buckling uses the DNV-RP-C201 equivalent drivers (Sec 6.6 k_sigma(psi) for sigma_x, Sec 6.8 for sigma_y)",
+        "Ritz plate basis adapts to the aspect ratio (about a/b half-waves); rotational support CL is analysed as simply supported and FS is rejected",
         "PULS user manual U3 limits are reported as diagnostics; covered-domain gates remain controlled by solver config",
     ]
 
@@ -5202,6 +5912,62 @@ def _pressure_dominated_yield_limit(
     return preload_share >= config.pressure_dominated_yield_preload_ratio
 
 
+GLOBAL_COLUMN_CAP_FAILURE_FAMILIES = ("global-stiffener-cutoff", "torsional-stiffener")
+
+
+def _global_column_elastic_cap(buckling: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return the column-type global elastic factor that bounds the S3 ultimate capacity.
+
+    Column-type global buckling of the stiffener with its attached plating has
+    no post-buckling reserve, so the reported ultimate capacity factor may not
+    exceed its elastic factor.  In :func:`elastic_buckling_factors` the
+    column-type candidates are the ``global-stiffener-cutoff`` failure family:
+
+    * ``global-cylindrical:m,0`` -- y-uniform modes of the stiffener and its
+      full attached plate width, simply supported over the span; for m = 1 the
+      raw factor is the Euler column ``pi^2 E I / (A L^2) / sigma_x``;
+    * ``stiffener-column`` -- the wide-panel orthotropic candidate, which
+      reduces to the same Euler column when no transverse stress acts.
+
+    The family factor is taken as reported in ``modeled_failure_families``,
+    i.e. after the elastic local-global (secant) coupling, which is the global
+    factor the continuation's lateral-deformation (Perry) term uses.  The
+    ``torsional-stiffener`` (tripping) elastic factor is included as well:
+    tripping is the other global stiffener mode without post-buckling reserve
+    (the SI torsional-deformation stress already diverges at it, so it acts
+    as a safety net).  Local plate, plate-shear and web modes are not used:
+    plating has post-buckling reserve.  The ``global-stiffened-strip`` family
+    (n >= 1 orthotropic strip modes whose shapes vanish at the stiffener
+    lines) is not a column mode and is not used either.
+    """
+
+    families = buckling.get("modeled_failure_families") or {}
+    candidates = []
+    for name in GLOBAL_COLUMN_CAP_FAILURE_FAMILIES:
+        row = families.get(name)
+        if not row:
+            continue
+        factor = _optional_float(row.get("critical_factor"))
+        if factor is None or factor <= EPS or not math.isfinite(factor):
+            continue
+        candidates.append(
+            {
+                "factor": factor,
+                "failure_family": name,
+                "critical_mode": row.get("critical_mode"),
+                "uncoupled_factor": row.get("uncoupled_factor"),
+            }
+        )
+    if not candidates:
+        return None
+    governing = min(candidates, key=lambda item: item["factor"])
+    return {
+        **governing,
+        "applied": False,
+        "basis": "no post-buckling reserve for column-type global buckling",
+    }
+
+
 def _s3_major_yield_utilization_limit(config: S3SolverConfig) -> float:
     """Return the S3 utilization target for major yield/collapse detection."""
 
@@ -5225,6 +5991,37 @@ def _mode_convergence_config(
         longitudinal_modes=longitudinal_modes,
         transverse_modes=transverse_modes,
         check_mode_convergence=False,
+        auto_mode_count=False,
+    )
+
+
+def _refined_mode_convergence_configs(
+    panel: S3PanelInput | U3PanelInput,
+    config: S3SolverConfig,
+) -> tuple[S3SolverConfig, S3SolverConfig]:
+    """Return the medium and high refined bases for the mode-convergence check.
+
+    The refined bases must be richer than the basis actually solved.  With the
+    aspect-ratio adaptive plate basis the configured medium/high tuples can be
+    smaller than the base, so each refined basis is the configured tuple
+    extended to one (medium) or two (high) half-waves beyond the base plate
+    basis in each direction.  The refined solves use exactly these tuples.
+    """
+
+    base_longitudinal, base_transverse = plate_mode_tuples(panel, config)
+    longitudinal_top = max(base_longitudinal, default=0)
+    transverse_top = max(base_transverse, default=0)
+
+    def refined(longitudinal: Sequence[int], transverse: Sequence[int], extra: int) -> S3SolverConfig:
+        return _mode_convergence_config(
+            config,
+            _merged_mode_tuple(longitudinal, longitudinal_top + extra),
+            _merged_mode_tuple(transverse, transverse_top + extra),
+        )
+
+    return (
+        refined(config.medium_longitudinal_modes, config.medium_transverse_modes, 1),
+        refined(config.high_longitudinal_modes, config.high_transverse_modes, 2),
     )
 
 
@@ -5233,7 +6030,19 @@ def _summarize_mode_convergence(
     medium_result: S3Result,
     high_result: S3Result,
     config: S3SolverConfig,
+    medium_config: S3SolverConfig | None = None,
+    high_config: S3SolverConfig | None = None,
 ) -> dict[str, Any]:
+    medium_modes = (
+        (list(medium_config.longitudinal_modes), list(medium_config.transverse_modes))
+        if medium_config is not None
+        else (list(config.medium_longitudinal_modes), list(config.medium_transverse_modes))
+    )
+    high_modes = (
+        (list(high_config.longitudinal_modes), list(high_config.transverse_modes))
+        if high_config is not None
+        else (list(config.high_longitudinal_modes), list(config.high_transverse_modes))
+    )
     medium_buckling = _relative_drift(
         base_result.buckling_usage_factor,
         medium_result.buckling_usage_factor,
@@ -5263,8 +6072,8 @@ def _summarize_mode_convergence(
     return {
         "enabled": True,
         "medium_basis": {
-            "longitudinal_modes": list(config.medium_longitudinal_modes),
-            "transverse_modes": list(config.medium_transverse_modes),
+            "longitudinal_modes": medium_modes[0],
+            "transverse_modes": medium_modes[1],
             "valid": medium_result.valid,
             "buckling_usage_factor": medium_result.buckling_usage_factor,
             "ultimate_usage_factor": medium_result.ultimate_usage_factor,
@@ -5272,8 +6081,8 @@ def _summarize_mode_convergence(
             "ultimate_relative_drift": medium_ultimate,
         },
         "high_basis": {
-            "longitudinal_modes": list(config.high_longitudinal_modes),
-            "transverse_modes": list(config.high_transverse_modes),
+            "longitudinal_modes": high_modes[0],
+            "transverse_modes": high_modes[1],
             "valid": high_result.valid,
             "buckling_usage_factor": high_result.buckling_usage_factor,
             "ultimate_usage_factor": high_result.ultimate_usage_factor,
@@ -5333,9 +6142,16 @@ def _attach_reliability(
     solver: Any,
     validation_reasons: Sequence[str] | None = None,
 ) -> S3Result:
+    downgrades = [
+        f"downgrade:{reason}"
+        for reason in (result.diagnostics.get("confidence_downgrades") or [])
+    ]
     if not config.include_solver_diagnostics and not config.check_mode_convergence:
         confidence = "medium" if result.valid else "low"
         confidence_reasons = [] if result.valid else list(validation_reasons or ())
+        if result.valid and downgrades:
+            confidence = "low"
+            confidence_reasons = confidence_reasons + downgrades
         diagnostics = dict(result.diagnostics)
         diagnostics.setdefault("mode_convergence", {"enabled": False})
         return S3Result(
@@ -5354,27 +6170,16 @@ def _attach_reliability(
     diagnostics["validation_domain"] = validation_domain
     mode_convergence = diagnostics.get("mode_convergence")
     if result.valid and config.check_mode_convergence:
-        medium_result = solver(
-            panel,
-            _mode_convergence_config(
-                config,
-                config.medium_longitudinal_modes,
-                config.medium_transverse_modes,
-            ),
-        )
-        high_result = solver(
-            panel,
-            _mode_convergence_config(
-                config,
-                config.high_longitudinal_modes,
-                config.high_transverse_modes,
-            ),
-        )
+        medium_config, high_config = _refined_mode_convergence_configs(panel, config)
+        medium_result = solver(panel, medium_config)
+        high_result = solver(panel, high_config)
         mode_convergence = _summarize_mode_convergence(
             result,
             medium_result,
             high_result,
             config,
+            medium_config,
+            high_config,
         )
     elif mode_convergence is None:
         mode_convergence = {"enabled": False}
@@ -5385,6 +6190,9 @@ def _attach_reliability(
         mode_convergence,
         config,
     )
+    if result.valid and downgrades:
+        confidence = "low"
+        confidence_reasons = list(confidence_reasons) + downgrades
     diagnostics["confidence"] = confidence
     diagnostics["confidence_reasons"] = confidence_reasons
     return S3Result(
@@ -5416,14 +6224,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             validation_reasons,
         )
 
-    if all(
-        abs(value) <= EPS
-        for value in (
-            panel.axial_stress,
-            panel.mean_transverse_stress,
-            panel.shear_stress,
-        )
-    ):
+    if not _has_variable_load(panel):
         return _attach_reliability(
             _invalid_result("zero-variable-load"),
             panel,
@@ -5551,6 +6352,7 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
     collapse_state = "major-yield"
     final_yield = pressure_yield
     local_global_coupling = local_global_stiffness_scale(panel, modes, amplitudes, 0.0, config)
+    stability_loss: dict[str, Any] | None = None
 
     accepted_steps = 0
     rejected_steps = 0
@@ -5647,6 +6449,24 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             if max_accepted_step is None
             else max(max_accepted_step, attempted_step)
         )
+        stability_loss = _continuation_stability_loss(
+            modes,
+            runtime,
+            amplitudes,
+            load_factor,
+            lower_modes,
+            lower_runtime,
+            lower_amplitudes,
+            lower_load,
+        )
+        if stability_loss is not None:
+            # The converged state lies on an unstable global branch: the load
+            # path passed the global (column-type) instability between the
+            # last stable step and this one.  No post-buckling reserve.
+            yield_capacity_factor = max(float(stability_loss["load_factor"]), EPS)
+            collapse_state = "global-stability-loss"
+            previous_load = load_factor
+            break
         ultimate_yield_global_factor = (
             governing_global_factor
             if config.include_lateral_deformation_in_ultimate_yield
@@ -5806,6 +6626,24 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             validation_reasons,
         )
 
+    # Raw first-yield / collapse capacity of the continuation, before any cap.
+    raw_ultimate_capacity_factor = ultimate_capacity_factor
+    confidence_downgrades: list[str] = []
+    global_column_cap = _global_column_elastic_cap(buckling)
+    if global_column_cap is not None:
+        cap_factor = float(global_column_cap["factor"])
+        global_column_cap["applied"] = ultimate_capacity_factor > cap_factor + EPS
+        if global_column_cap["applied"]:
+            # Column-type global buckling has no post-buckling reserve: the
+            # load path cannot pass the global elastic factor.  A larger
+            # continuation capacity means the load steps passed the global
+            # instability and converged on an unstable branch.
+            ultimate_capacity_factor = cap_factor
+            collapse_state = "global-column-elastic-cap"
+            confidence_downgrades.append("ultimate-capped-at-global-column-elastic-factor")
+    if stability_loss is not None:
+        confidence_downgrades.append("continuation-lost-stability")
+
     pressure_dominated_yield = _pressure_dominated_yield_limit(
         panel,
         pressure_yield,
@@ -5832,14 +6670,19 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         buckling_strength_limits.items(),
         key=lambda item: float(item[1]),
     )
-    raw_ultimate_capacity_factor = ultimate_capacity_factor
-    reported_ultimate_capacity_factor = max(
-        raw_ultimate_capacity_factor,
-        buckling_strength_capacity_factor,
-    )
-    ultimate_lifted_to_buckling_strength = (
-        reported_ultimate_capacity_factor > raw_ultimate_capacity_factor + EPS
-    )
+    # The reported ultimate capacity is the continuation capacity (capped at
+    # the global column elastic factor above); it is never lifted to the
+    # elastic buckling-strength envelope.  A pressure-dominated first yield
+    # still leaves the buckling-strength envelope, but it can no longer lower
+    # the ultimate usage factor.
+    reported_ultimate_capacity_factor = ultimate_capacity_factor
+    ultimate_notes: list[str] = []
+    if pressure_dominated_yield and not include_ultimate_in_buckling_strength:
+        ultimate_notes.append(
+            "pressure-dominated first yield is excluded from the buckling-strength envelope; "
+            "the ultimate usage factor is the first-yield/collapse capacity and is not lifted "
+            "to the elastic buckling factor"
+        )
     buckling_strength = {
         "capacity_factor": buckling_strength_capacity_factor,
         "usage_factor": 1.0 / max(buckling_strength_capacity_factor, EPS),
@@ -5851,9 +6694,11 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
         "raw_ultimate_usage_factor": 1.0 / max(raw_ultimate_capacity_factor, EPS),
         "raw_ultimate_capacity_factor": raw_ultimate_capacity_factor,
         "reported_ultimate_capacity_factor": reported_ultimate_capacity_factor,
-        "ultimate_lifted_to_buckling_strength": ultimate_lifted_to_buckling_strength,
+        "ultimate_lifted_to_buckling_strength": False,
+        "global_column_elastic_cap": global_column_cap,
         "pressure_dominated_yield_limit": pressure_dominated_yield,
         "ultimate_included": include_ultimate_in_buckling_strength,
+        "notes": ultimate_notes,
     }
     diagnostics = {
         "collapse_state": collapse_state,
@@ -5866,31 +6711,40 @@ def solve_s3_panel(panel: S3PanelInput, config: S3SolverConfig | None = None) ->
             config.include_lateral_deformation_in_ultimate_yield
         ),
         "global_elastic_cutoff_factor": global_elastic_cutoff_factor,
+        "global_column_elastic_cap": global_column_cap,
+        "continuation_stability_loss": stability_loss,
         "buckling": buckling,
         "pressure_preload_yield_utilization": pressure_yield,
         "pressure_preload_response": pressure_preload_response,
         "final_yield_utilization": final_yield,
         "max_newton_iterations": max_iterations,
         "mode_count": len(modes),
+        "ritz_basis": _ritz_basis_summary(panel, config),
         "section": asdict(section),
         "stiffener_section": asdict(stiffener_section),
         "effective_stiffener_plate_width": effective_width,
         "load_components": normalized_load_components(panel),
         "support_model": SUPPORTED_IN_PLANE_SUPPORTS[panel.in_plane_support],
+        "support_notes": _support_model_notes(panel),
         "local_global_coupling": local_global_coupling,
         "continuation_geometric_coupling": runtime.geometric_coupling,
         "continuation": continuation,
         "buckling_strength": buckling_strength,
+        "confidence_downgrades": confidence_downgrades,
     } if config.include_solver_diagnostics else {
         "collapse_state": collapse_state,
         "capacity_factor": reported_ultimate_capacity_factor,
         "raw_capacity_factor": raw_ultimate_capacity_factor,
         "yield_capacity_factor": yield_capacity_factor,
         "global_elastic_cutoff_factor": global_elastic_cutoff_factor,
+        "global_column_elastic_cap": global_column_cap,
+        "continuation_stability_loss": stability_loss,
         "max_newton_iterations": max_iterations,
         "mode_count": len(modes),
+        "support_notes": _support_model_notes(panel),
         "continuation": continuation,
         "buckling_strength": buckling_strength,
+        "confidence_downgrades": confidence_downgrades,
     }
     return _attach_reliability(
         S3Result(
@@ -5926,14 +6780,7 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
             validation_reasons,
         )
 
-    if all(
-        abs(value) <= EPS
-        for value in (
-            panel.axial_stress,
-            panel.mean_transverse_stress,
-            panel.shear_stress,
-        )
-    ):
+    if not _has_variable_load(panel):
         return _attach_reliability(
             _invalid_u3_result("zero-variable-load"),
             panel,
@@ -6142,13 +6989,10 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         key=lambda item: float(item[1]),
     )
     raw_ultimate_capacity_factor = yield_capacity_factor
-    reported_ultimate_capacity_factor = max(
-        raw_ultimate_capacity_factor,
-        buckling_strength_capacity_factor,
-    )
-    ultimate_lifted_to_buckling_strength = (
-        reported_ultimate_capacity_factor > raw_ultimate_capacity_factor + EPS
-    )
+    # Never lifted to the elastic envelope (the reported ultimate capacity is
+    # the first-yield capacity).
+    reported_ultimate_capacity_factor = raw_ultimate_capacity_factor
+    ultimate_lifted_to_buckling_strength = False
     buckling_strength = {
         "capacity_factor": buckling_strength_capacity_factor,
         "usage_factor": 1.0 / max(buckling_strength_capacity_factor, EPS),
@@ -6176,12 +7020,14 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         "final_yield_utilization": final_yield,
         "max_newton_iterations": max_iterations,
         "mode_count": len(modes),
+        "ritz_basis": _ritz_basis_summary(panel, config),
         "load_components": normalized_load_components(panel),
         "support_model": SUPPORTED_IN_PLANE_SUPPORTS[panel.in_plane_support],
         "rotational_support": {
             "x_edges": panel.rotational_support_1,
             "y_edges": panel.rotational_support_2,
         },
+        "support_notes": _support_model_notes(panel),
         "continuation_geometric_coupling": runtime.geometric_coupling,
         "continuation": continuation,
         "buckling_strength": buckling_strength,
@@ -6193,6 +7039,7 @@ def solve_u3_panel(panel: U3PanelInput, config: S3SolverConfig | None = None) ->
         "yield_capacity_factor": yield_capacity_factor,
         "max_newton_iterations": max_iterations,
         "mode_count": len(modes),
+        "support_notes": _support_model_notes(panel),
         "continuation": continuation,
         "buckling_strength": buckling_strength,
     }
