@@ -25,10 +25,12 @@ import math
 import random
 import statistics
 from dataclasses import asdict, dataclass, field, replace
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, MutableMapping, Sequence
 
 import numpy as np
+from scipy import sparse
 
 try:
     from numba import njit
@@ -402,6 +404,12 @@ class MembraneField:
     grid_x_fractions: np.ndarray
     grid_y_fractions: np.ndarray
     edge_mean_axial_factors: np.ndarray
+    # Sparse copies for the Python (non-numba) path: C as rows (h, i) x j,
+    # C flattened as (i, j) x h, and E.  C and E are about 1 % non-zero, so
+    # the per-iteration contractions skip the zero terms.
+    coupling_rows: Any = None
+    coupling_flat_transposed: Any = None
+    energy_sparse: Any = None
 
 
 @dataclass(frozen=True)
@@ -3016,14 +3024,12 @@ def build_membrane_field(
         elastic_modulus,
         poisson_ratio,
     )
-    energy_coupling = np.einsum("hl,lij->hij", energy_matrix, coupling)
+    energy_coupling = np.tensordot(energy_matrix, coupling, axes=1)
 
     imperfection_array = np.asarray(imperfection, dtype=float)
     if imperfection_array.shape != (count,):
         imperfection_array = np.zeros(count, dtype=float)
-    imperfection_offset = np.einsum(
-        "hij,i,j->h", coupling, imperfection_array, imperfection_array
-    )
+    imperfection_offset = (coupling @ imperfection_array) @ imperfection_array
 
     fractions = np.asarray(grid_fractions, dtype=float)
     grid_x = np.repeat(fractions, len(fractions))
@@ -3070,6 +3076,9 @@ def build_membrane_field(
         grid_x_fractions=grid_x,
         grid_y_fractions=grid_y,
         edge_mean_axial_factors=edge_mean_axial_factors,
+        coupling_rows=sparse.csr_matrix(coupling.reshape(-1, count)),
+        coupling_flat_transposed=sparse.csr_matrix(coupling.reshape(coupling.shape[0], -1).T),
+        energy_sparse=sparse.csr_matrix(energy_matrix),
     )
 
 
@@ -3206,11 +3215,9 @@ def _max_von_mises_ratio_kernel(
 
 
 def _membrane_amplitudes(field: MembraneField, total_deflection: np.ndarray) -> np.ndarray:
-    if not NUMBA_AVAILABLE:
-        return (
-            np.einsum("hij,i,j->h", field.coupling, total_deflection, total_deflection)
-            - field.imperfection_offset
-        )
+    if not NUMBA_AVAILABLE or field.coupling_rows is not None:
+        # sum_ij C_hij w_i w_j: (C w) contracts j, then w contracts i.
+        return _coupling_gradients(field, total_deflection) @ total_deflection - field.imperfection_offset
     return _membrane_amplitudes_kernel(
         field.coupling,
         field.imperfection_offset,
@@ -3223,9 +3230,9 @@ def _membrane_force(
     total_deflection: np.ndarray,
     amplitudes: np.ndarray,
 ) -> np.ndarray:
-    if not NUMBA_AVAILABLE:
-        weighted = field.energy_matrix @ amplitudes
-        return 2.0 * np.einsum("h,hij,j->i", weighted, field.coupling, total_deflection)
+    if not NUMBA_AVAILABLE or field.coupling_rows is not None:
+        weighted = _energy_product(field, amplitudes)
+        return 2.0 * (_weighted_coupling(field, weighted) @ total_deflection)
     return _membrane_force_kernel(field.energy_coupling, total_deflection, amplitudes)
 
 
@@ -3234,12 +3241,10 @@ def _membrane_tangent(
     total_deflection: np.ndarray,
     amplitudes: np.ndarray,
 ) -> np.ndarray:
-    if not NUMBA_AVAILABLE:
-        gradients = np.einsum("hij,j->hi", field.coupling, total_deflection)
-        weighted = field.energy_matrix @ amplitudes
-        return 4.0 * gradients.T @ (field.energy_matrix @ gradients) + 2.0 * np.einsum(
-            "h,hij->ij", weighted, field.coupling
-        )
+    if not NUMBA_AVAILABLE or field.coupling_rows is not None:
+        gradients = _coupling_gradients(field, total_deflection)
+        weighted = _energy_product(field, amplitudes)
+        return 4.0 * gradients.T @ _energy_product(field, gradients) + 2.0 * _weighted_coupling(field, weighted)
     return _membrane_tangent_kernel(
         field.coupling,
         field.imperfection_offset,
@@ -3248,6 +3253,50 @@ def _membrane_tangent(
         total_deflection,
         amplitudes,
     )
+
+
+def _membrane_state_python(
+    field: MembraneField,
+    total_deflection: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the membrane amplitudes, force and tangent from one set of contractions.
+
+    Same arithmetic as :func:`_membrane_amplitudes`, :func:`_membrane_force` and
+    :func:`_membrane_tangent` (Python path), but ``C w`` and
+    ``sum_h (E a)_h C_h`` are formed once per Newton iteration instead of
+    two or three times.
+    """
+
+    gradients = _coupling_gradients(field, total_deflection)
+    amplitudes = gradients @ total_deflection - field.imperfection_offset
+    weighted_coupling = _weighted_coupling(field, _energy_product(field, amplitudes))
+    force = 2.0 * (weighted_coupling @ total_deflection)
+    tangent = 4.0 * gradients.T @ _energy_product(field, gradients) + 2.0 * weighted_coupling
+    return amplitudes, force, tangent
+
+
+def _coupling_gradients(field: MembraneField, total_deflection: np.ndarray) -> np.ndarray:
+    """Return (C w)_hi = sum_j C_hij w_j as an (H, N) array."""
+
+    if field.coupling_rows is None:
+        return field.coupling @ total_deflection
+    return (field.coupling_rows @ total_deflection).reshape(field.coupling.shape[:2])
+
+
+def _weighted_coupling(field: MembraneField, weighted: np.ndarray) -> np.ndarray:
+    """Return sum_h weighted_h C_hij as an (N, N) array."""
+
+    if field.coupling_flat_transposed is None:
+        return np.tensordot(weighted, field.coupling, axes=1)
+    return (field.coupling_flat_transposed @ weighted).reshape(field.coupling.shape[1:])
+
+
+def _energy_product(field: MembraneField, values: np.ndarray) -> np.ndarray:
+    """Return E @ values."""
+
+    if field.energy_sparse is None:
+        return field.energy_matrix @ values
+    return np.asarray(field.energy_sparse @ values)
 
 
 def _membrane_stress_components(
@@ -3747,6 +3796,64 @@ def _curvature_point(
     )
 
 
+_MEMBRANE_FIELD_CACHE: "OrderedDict[tuple, MembraneField | None]" = OrderedDict()
+_MEMBRANE_FIELD_CACHE_SIZE = 4
+
+
+def _cached_membrane_field(
+    modes: Sequence[RitzMode],
+    length: float,
+    width: float,
+    thickness: float,
+    elastic_modulus: float,
+    imperfection: Sequence[float],
+    grid_fractions: Sequence[float],
+    poisson_ratio: float = 0.3,
+) -> MembraneField | None:
+    """Return :func:`build_membrane_field`, reusing the last few identical builds.
+
+    The field depends only on the mode shapes (m, n, kx, ky), the imperfection
+    amplitudes, the panel geometry, the elastic constants and the grid -- not
+    on the mode stiffnesses.  The continuation rebuilds its runtime when the
+    local-global coupling scale changes the stiffnesses, so the identical
+    field was rebuilt several times per solve.  The key holds every input
+    exactly; any difference builds a new field.
+    """
+
+    key = (
+        tuple((mode.m, mode.n, float(mode.kx), float(mode.ky)) for mode in modes),
+        float(length),
+        float(width),
+        float(thickness),
+        float(elastic_modulus),
+        tuple(float(value) for value in imperfection),
+        tuple(float(value) for value in grid_fractions),
+        float(poisson_ratio),
+    )
+    if key in _MEMBRANE_FIELD_CACHE:
+        _MEMBRANE_FIELD_CACHE.move_to_end(key)
+        return _MEMBRANE_FIELD_CACHE[key]
+    field = build_membrane_field(
+        modes,
+        length,
+        width,
+        thickness,
+        elastic_modulus,
+        imperfection,
+        grid_fractions,
+        poisson_ratio=poisson_ratio,
+    )
+    if field is not None:
+        # The cached field is shared between runtimes: make its arrays read-only.
+        for value in vars(field).values():
+            if isinstance(value, np.ndarray):
+                value.setflags(write=False)
+    _MEMBRANE_FIELD_CACHE[key] = field
+    while len(_MEMBRANE_FIELD_CACHE) > _MEMBRANE_FIELD_CACHE_SIZE:
+        _MEMBRANE_FIELD_CACHE.popitem(last=False)
+    return field
+
+
 def _build_ritz_runtime(
     panel: S3PanelInput | U3PanelInput,
     modes: Sequence[RitzMode],
@@ -3793,7 +3900,7 @@ def _build_ritz_runtime(
     )
     plate_x_fractions = np.asarray([point.x_fraction for point in plate_points], dtype=float)
     plate_y_fractions = np.asarray([point.y_fraction for point in plate_points], dtype=float)
-    membrane = build_membrane_field(
+    membrane = _cached_membrane_field(
         modes,
         panel.length,
         panel.width,
@@ -4977,9 +5084,8 @@ def _solve_equilibrium_amplitudes_python(
     for iteration in range(1, config.newton_max_iterations + 1):
         if membrane is not None:
             total_deflection = q + imperfection
-            membrane_amplitudes = _membrane_amplitudes(membrane, total_deflection)
-            nonlinear_response = _membrane_force(
-                membrane, total_deflection, membrane_amplitudes
+            _, nonlinear_response, membrane_tangent = _membrane_state_python(
+                membrane, total_deflection
             )
         else:
             nonlinear_response = nonlinear * q**3
@@ -4995,9 +5101,7 @@ def _solve_equilibrium_amplitudes_python(
             return q.tolist(), True, iteration
 
         if membrane is not None:
-            tangent = tangent_linear + _membrane_tangent(
-                membrane, total_deflection, membrane_amplitudes
-            )
+            tangent = tangent_linear + membrane_tangent
         else:
             tangent = tangent_linear.copy()
             tangent.flat[::diagonal_stride] = (
@@ -5035,7 +5139,10 @@ def solve_equilibrium_amplitudes(
         return [], True, 0
 
     runtime = runtime or _build_ritz_runtime(panel, modes, config)
-    if NUMBA_AVAILABLE and runtime.membrane is not None:
+    # The sparse Python contractions are faster than the dense numba kernel
+    # (the coupling tensor is about 1 % non-zero), so the kernel is used only
+    # for a field without sparse copies.
+    if NUMBA_AVAILABLE and runtime.membrane is not None and runtime.membrane.coupling_rows is None:
         q = np.asarray(previous_amplitudes, dtype=float)
         if q.shape != (len(modes),):
             q = np.zeros(len(modes), dtype=float)

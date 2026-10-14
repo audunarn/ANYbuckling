@@ -104,11 +104,10 @@ again by an independent sweep (§8). Sections 3–7 keep the original findings a
   factors ≠ 1 (U3), mixed-sign axial stress (U5), pressure-dominated panels (U2) and slender
   columns (U1). Example: README S3 panel, ultimate UF raw 0.947 → 1.090; U3 test row
   0.917 → 1.148. The S3 buckling UF is now never below the ultimate UF (U2′).
-- SemiAnalytical solves are slower, because the converged basis has more modes (Python path,
-  numba not installed, median of 5): S3 at L/s = 3 / 5 / 8 / 12 takes 78 / 138 / 317 / 344 ms
-  (before the fixes 30 / 26 / 19 / 7 ms); U3 10 / 24 / 75 / 194 ms (before 7 / 6 / 6 / 5 ms).
-  `S3SolverConfig(auto_mode_count=False)` restores the old basis and speed, with the old,
-  unconverged values.
+- SemiAnalytical solves are somewhat slower, because the converged basis has more modes. After the
+  performance work in §10, 160 realistic S3 panels take 28 ms each, against 19 ms before the review.
+  S3 at L/s = 3 / 5 / 8 / 12 takes 35 / 30 / 37 / 159 ms, against 30 / 26 / 19 / 7 ms before.
+  `S3SolverConfig(auto_mode_count=False)` restores the old basis, with the old, unconverged values.
 
 ## 1. How the review was done, and its limits
 
@@ -658,3 +657,41 @@ stiffness of a plate with smeared open-section stiffeners:
 **Pinned values.** README S3 ultimate UF raw 1.0905 → 1.1432. With the fixed (1, 2, 3) × (1, 2) basis the S3 ultimate is 1.0476 (originally 0.9466). The elastic values and all U3 values are unchanged.
 
 **Not done.** No PULS recalibration. The PULS gates should be rerun once the reference data is available.
+
+## 10. Follow-up: solver performance (no change in results)
+
+The fixes made the S3/U3 solves slower: the converged basis has 2–4× more modes, and S3 took
+about 6× longer on realistic panels. Profiling showed three causes, all in how the membrane
+(von Kármán) terms were evaluated. None of them is in the mechanics.
+
+1. **Dense contractions on very sparse tensors.** The coupling tensor C<sub>hij</sub> (e.g.
+   309 × 60 × 60) is about 1 % non-zero and the membrane energy matrix about 0.6 %.
+   - The Python path contracted them with dense `einsum` in every Newton iteration.
+   - `build_membrane_field` now stores CSR copies, and the amplitudes, force and tangent are
+     evaluated with sparse products.
+   - The shared terms C·w and Σ<sub>h</sub>(E a)<sub>h</sub>C<sub>h</sub> are formed once per iteration
+     (`_membrane_state_python`). Before, they were formed two or three times.
+2. **The same membrane field was rebuilt repeatedly.** It was rebuilt each time the local-global
+   coupling changed the mode stiffnesses: up to 9 times per solve.
+   - The field depends only on the mode shapes, imperfections, geometry and grid.
+   - `_cached_membrane_field` reuses the last 4 builds. Its key holds every input exactly, and
+     the cached arrays are read-only.
+3. **The numba kernels were slower than the sparse path.** They loop over the dense tensor
+   (3.1 s for S3 at L/s = 12, against 0.15 s now). With the sparse copies present, both paths
+   use the sparse code.
+
+**Results.** All 252 tests pass with and without numba, and the UFs are identical to full
+printed precision across both paths and the previous commit.
+
+**Timings** (median of 5, field cache cleared before each solve):
+
+| Case | Before the review | Before this work | Now (no numba) | Now (numba) |
+|---|---|---|---|---|
+| S3, L/s = 3 / 5 / 8 / 12 (ms) | 30 / 26 / 19 / 7 | 78 / 138 / 317 / 344 | 24–35 / 30–34 / 37–39 / 159–172 | 29 / 31 / 38 / 150 |
+| U3, L/s = 3 / 5 / 8 / 12 (ms) | 7 / 6 / 6 / 5 | 10 / 24 / 75 / 194 | 9 / 12 / 16 / 40 | — |
+| 160 realistic S3 panels (ms each) | 19 | 114 | 28 | — |
+
+**Not changed.** At L/s = 12 most of the remaining time is in load steps near collapse, where
+Newton runs to its 40-iteration limit before the step is cut back (6 such steps, 240 of
+348 iterations). Stopping those iterations earlier would change which steps are accepted, and
+so the results, so the algorithm was left as it is.
