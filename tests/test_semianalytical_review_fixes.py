@@ -201,12 +201,16 @@ def test_u5_envelope_diagnostics_name_the_governing_end():
 def test_u5_small_tension_end_does_not_invalidate_the_panel(tension):
     # |sigma| * max_load_factor = 350 MPa < fy: the tension end cannot yield within the load range, so its
     # usage factor is below 1 / max_load_factor and the envelope is the compression end.
-    mixed = flat(680, 12, 3300, README_BULB, sx=150, sx2=tension).get_buckling_results()
+    mixed_panel = flat(680, 12, 3300, README_BULB, sx=150, sx2=tension)
+    mixed = mixed_panel.get_buckling_results()
     compression_only = flat(680, 12, 3300, README_BULB, sx=150).get_buckling_results()
     assert abs(tension) * S.S3SolverConfig().max_load_factor < FY
     assert mixed['valid prediction'] == 1
     assert mixed['ultimate UF raw'] == pytest.approx(compression_only['ultimate UF raw'], rel=1e-12)
     assert mixed['buckling UF raw'] == pytest.approx(compression_only['buckling UF raw'], rel=1e-12)
+    # The optimisation path solves without diagnostics and must apply the same bound.
+    vector = S.predict_anystructure_uf_with_acceptance(mixed_panel._FlatStructure, selected_method='ultimate')
+    assert vector[1] == pytest.approx(compression_only['ultimate UF raw'], rel=1e-9)
 
 
 def test_u5_envelope_buckling_diagnostics_come_from_the_buckling_end():
