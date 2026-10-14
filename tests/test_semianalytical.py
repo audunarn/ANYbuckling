@@ -1,8 +1,13 @@
 '''
-Direct tests of the semi-analytical S3/U3 solver. Reference values are
-taken from the original ANYstructure implementation on identical inputs
-(parity verified at the time of the code transfer).
+Direct tests of the semi-analytical S3/U3 solver. The pinned values are
+regression values of the solver after the calculation-review fixes
+(docs/review/CALCULATION_REVIEW.md); they differ from the original ANYstructure
+parity values only through the aspect-ratio adaptive Ritz basis (finding S1).
+With ``auto_mode_count=False`` the original parity values are reproduced
+(see ``test_original_parity_with_fixed_mode_basis``).
 '''
+import dataclasses
+
 import pytest
 
 from anybuckling.semianalytical import (
@@ -36,8 +41,13 @@ def test_solve_s3_panel():
 
     assert result.valid is True
     assert result.invalid_reason is None
-    assert result.buckling_usage_factor == pytest.approx(1.445366740628527, rel=1e-6)
-    assert result.ultimate_usage_factor == pytest.approx(0.9465671231264069, rel=1e-6)
+    # Elastic buckling envelope (local plate + shear, Ritz-combined) with the
+    # local plate basis m = 1..6 for L/s = 4.85 (review S1); was 1.445366740628527
+    # with the fixed m <= 3 basis.
+    assert result.buckling_usage_factor == pytest.approx(1.445370673941167, rel=1e-6)
+    # Major-yield ultimate capacity with the m = 1..6 local plate basis (review
+    # S1); the fixed m <= 3 basis gave the unconservative 0.9465671231264069.
+    assert result.ultimate_usage_factor == pytest.approx(1.0415100838527238, rel=1e-6)
 
 
 def test_solve_u3_panel():
@@ -45,8 +55,25 @@ def test_solve_u3_panel():
 
     assert result.valid is True
     assert result.invalid_reason is None
-    assert result.buckling_usage_factor == pytest.approx(1.5899034146913802, rel=1e-6)
-    assert result.ultimate_usage_factor == pytest.approx(0.9166210069632023, rel=1e-6)
+    # Elastic plate/shear buckling envelope with the plate basis m = 1..6 for
+    # a/b = 4.85 (review S1); was 1.5899034146913802 with m <= 3.
+    assert result.buckling_usage_factor == pytest.approx(1.5899077413352847, rel=1e-6)
+    # First-yield ultimate capacity with the m = 1..6 basis (review S1); the
+    # fixed m <= 3 basis gave the unconservative 0.9166210069632023.
+    assert result.ultimate_usage_factor == pytest.approx(1.067753466419739, rel=1e-6)
+
+
+def test_original_parity_with_fixed_mode_basis():
+    # The original ANYstructure parity values are reproduced with the fixed
+    # (1, 2, 3) x (1, 2) basis: the pinned changes above come from S1 alone.
+    fixed = dataclasses.replace(S3SolverConfig(), auto_mode_count=False)
+    s3 = solve_s3_panel(row_to_s3_input(S3_ROW), fixed)
+    u3 = solve_u3_panel(row_to_u3_input(U3_ROW), fixed)
+
+    assert s3.buckling_usage_factor == pytest.approx(1.445366740628527, rel=1e-6)
+    assert s3.ultimate_usage_factor == pytest.approx(0.9465671231264069, rel=1e-6)
+    assert u3.buckling_usage_factor == pytest.approx(1.5899034146913802, rel=1e-6)
+    assert u3.ultimate_usage_factor == pytest.approx(0.9166210069632023, rel=1e-6)
 
 
 def test_invalid_input_reported_not_raised():

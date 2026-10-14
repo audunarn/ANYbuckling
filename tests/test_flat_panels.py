@@ -38,8 +38,12 @@ def test_semi_analytical_stiffened_panel(flat_panel_builder):
     assert results['method'] == 'SemiAnalytical S3/U3'
     assert results['valid prediction'] == 1
     assert results['panel family'] == 'S3'
-    assert results['buckling UF raw'] == pytest.approx(1.445366740628527, rel=1e-6)
-    assert results['ultimate UF raw'] == pytest.approx(0.9465671231264069, rel=1e-6)
+    # Elastic buckling envelope with the aspect-ratio adaptive local plate basis
+    # m = 1..6 for L/s = 4.85 (calculation review S1); 1.445366740628527 with m <= 3.
+    assert results['buckling UF raw'] == pytest.approx(1.445370673941167, rel=1e-6)
+    # Major-yield ultimate capacity with the m = 1..6 local plate basis (review
+    # S1); the fixed m <= 3 basis gave the unconservative 0.9465671231264069.
+    assert results['ultimate UF raw'] == pytest.approx(1.0415100838527238, rel=1e-6)
     # UFs include the material factor of 1.15
     assert results['ultimate UF'] == pytest.approx(results['ultimate UF raw'] * 1.15, rel=1e-9)
     assert results['selected UF'] == results['ultimate UF']
