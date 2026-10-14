@@ -342,6 +342,30 @@ def test_u1_solver_capacity_bounded_by_column_factor_and_flagged():
             result.diagnostics['buckling_strength']['raw_ultimate_capacity_factor'] + 1e-12)
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# S5 -- global cross-rigidity of a plate with open stiffeners: H = D + G I_t / (2 s), not Huber sqrt(D11 D22)
+# ---------------------------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize('length, spacing, hw', [(6000.0, 700.0, 120.0), (4000.0, 900.0, 120.0), (6000.0, 700.0, 160.0)])
+def test_s5_wide_panel_transverse_factor_matches_orthotropic_closed_form(length, spacing, hw):
+    # Wide orthotropic plate under sigma_y only: min over ky of (D11 kx^4 + 2 H kx^2 ky^2 + D22 ky^4) / (N_y ky^2)
+    # = 2 (sqrt(D11 D22) + H) kx^2 / N_y, with D11 = E I / s of the stiffener and its attached plate, D22 = D and
+    # H = D + G I_t / (2 s), I_t = h_w t_w^3 / 3 for a flat bar.  The Huber H = sqrt(D11 D22) was 1.4-1.8x high.
+    t, tw, sy = 10.0, 10.0, 120.0
+    panel = s3_panel(length=length, stiffener_spacing=spacing, plate_thickness=t, stiffener_type='Flatbar',
+                     stiffener_height=hw, web_thickness=tw, flange_width=0.0, flange_thickness=0.0,
+                     axial_stress=0.0, transverse_stress_1=sy, transverse_stress_2=sy, shear_stress=0.0, pressure=0.0)
+    parts = [(spacing * t, 0.0, spacing * t ** 3 / 12.0), (hw * tw, t / 2 + hw / 2, tw * hw ** 3 / 12.0)]
+    area = sum(a for a, _, _ in parts)
+    centroid = sum(a * z for a, z, _ in parts) / area
+    inertia = sum(i + a * (z - centroid) ** 2 for a, z, i in parts)
+    plate_d = E * t ** 3 / (12.0 * (1.0 - NU ** 2))
+    d11 = E * inertia / spacing
+    h = plate_d + E / (2.0 * (1.0 + NU)) * (hw * tw ** 3 / 3.0) / (2.0 * spacing)
+    expected = min(2.0 * (math.sqrt(d11 * plate_d) + h) * (m * math.pi / length) ** 2 / (sy * t) for m in range(1, 10))
+    section = S.build_section_properties(panel)
+    assert S._stiffener_column_factor(panel, section, S.S3SolverConfig()) == pytest.approx(expected, rel=1e-9)
+
+
 def test_u1_ultimate_not_above_global_transverse_mode_outside_the_continuation_basis():
     # sigma_x = 0: the global orthotropic sigma_y mode (stiffeners bending over the span) is not in the
     # continuation basis, so its elastic factor bounds the ultimate (RP-C201 Sec 7 treats transverse

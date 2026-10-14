@@ -46,9 +46,10 @@ def test_solve_s3_panel():
     # with the fixed m <= 3 basis.
     assert result.buckling_usage_factor == pytest.approx(1.445370673941167, rel=1e-6)
     # Major-yield ultimate capacity with the m = 1..11 local plate basis
-    # (ceil(2 a/b) + 1, review S1); m <= 16 gives 1.0908.  The fixed m <= 3 basis
-    # gave the unconservative 0.9465671231264069 and m <= 6 gave 1.0415100838527238.
-    assert result.ultimate_usage_factor == pytest.approx(1.090471957072501, rel=1e-6)
+    # (ceil(2 a/b) + 1, review S1) and the global cross-rigidity
+    # H = D + G I_t / (2 s) (review S5; the Huber form sqrt(D11 D22) gave 1.090471957072501).
+    # The fixed m <= 3 basis with Huber H gave the unconservative 0.9465671231264069.
+    assert result.ultimate_usage_factor == pytest.approx(1.1431898345126301, rel=1e-6)
 
 
 def test_solve_u3_panel():
@@ -66,14 +67,16 @@ def test_solve_u3_panel():
 
 
 def test_original_parity_with_fixed_mode_basis():
-    # The original ANYstructure parity values are reproduced with the fixed
-    # (1, 2, 3) x (1, 2) basis: the pinned changes above come from S1 alone.
+    # With the fixed (1, 2, 3) x (1, 2) basis the original ANYstructure parity
+    # values are reproduced, except the S3 ultimate, which also changes with
+    # the global cross-rigidity (review S5): 0.9465671231264069 with the Huber
+    # H = sqrt(D11 D22), 1.0476162523280277 with H = D + G I_t / (2 s).
     fixed = dataclasses.replace(S3SolverConfig(), auto_mode_count=False)
     s3 = solve_s3_panel(row_to_s3_input(S3_ROW), fixed)
     u3 = solve_u3_panel(row_to_u3_input(U3_ROW), fixed)
 
     assert s3.buckling_usage_factor == pytest.approx(1.445366740628527, rel=1e-6)
-    assert s3.ultimate_usage_factor == pytest.approx(0.9465671231264069, rel=1e-6)
+    assert s3.ultimate_usage_factor == pytest.approx(1.0476162523280277, rel=1e-6)
     assert u3.buckling_usage_factor == pytest.approx(1.5899034146913802, rel=1e-6)
     assert u3.ultimate_usage_factor == pytest.approx(0.9166210069632023, rel=1e-6)
 

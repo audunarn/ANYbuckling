@@ -2070,16 +2070,38 @@ def _plate_bending_rigidity(panel: S3PanelInput) -> float:
     )
 
 
+def stiffener_torsion_constant(panel: S3PanelInput) -> float:
+    """Return the St. Venant torsion constant I_t of the open stiffener profile.
+
+    Thin-walled open section: I_t = (h_w t_w^3 + b_f t_f^3) / 3, the form
+    implied by DNV-RP-C201 (7.32).  The flange is ignored for flat bars.
+    """
+
+    torsion_constant = panel.stiffener_height * panel.web_thickness**3 / 3.0
+    if panel.stiffener_type != "Flatbar":
+        torsion_constant += max(panel.flange_width, 0.0) * max(panel.flange_thickness, 0.0) ** 3 / 3.0
+    return torsion_constant
+
+
 def build_orthotropic_stiffness(
     panel: S3PanelInput,
     section: S3SectionProperties,
     family: str,
     config: S3SolverConfig | None = None,
 ) -> OrthotropicStiffness:
-    """Build local-plate or distributed stiffened-strip stiffness terms."""
+    """Build local-plate or distributed stiffened-strip stiffness terms.
+
+    The local family is the isotropic plate (D11 = D22, H = D12 + 2 D66 = D,
+    times the flanged restraint factor).  The global family is the plate with
+    smeared open-section stiffeners along x: D11 = E I / s (stiffener with its
+    attached plate), D22 = D, D12 = nu D and 2 D66 = (1 - nu) D + G I_t / (2 s),
+    so that H = D + G I_t / (2 s) (the plate plus the St. Venant torsion of the
+    stiffeners; the smeared twisting energy of a stiffener is G I_t w_xy^2 / (2 s)).
+    """
 
     config = config or S3SolverConfig()
     plate_d = _plate_bending_rigidity(panel)
+    nu = panel.poisson_ratio
     if family == "local":
         restraint_factor = (
             max(config.flanged_local_plate_restraint_factor, EPS)
@@ -2088,16 +2110,19 @@ def build_orthotropic_stiffness(
         )
         d11 = plate_d * restraint_factor
         d22 = plate_d * restraint_factor
+        d12 = nu * d11
+        d66 = 0.5 * (1.0 - nu) * d11
         membrane_thickness = panel.plate_thickness
     elif family == "global":
         d11 = max(panel.elastic_modulus * section.inertia_x / panel.width, plate_d)
         d22 = plate_d
+        shear_modulus = panel.elastic_modulus / (2.0 * (1.0 + nu))
+        d12 = nu * plate_d
+        d66 = 0.5 * (1.0 - nu) * plate_d + shear_modulus * stiffener_torsion_constant(panel) / (4.0 * panel.width)
         membrane_thickness = max(section.area / panel.width, panel.plate_thickness)
     else:
         raise ValueError(f"Unknown stiffness family: {family}")
 
-    d12 = panel.poisson_ratio * math.sqrt(d11 * d22)
-    d66 = 0.5 * (1.0 - panel.poisson_ratio) * math.sqrt(d11 * d22)
     return OrthotropicStiffness(
         d11=d11,
         d12=d12,
@@ -2111,14 +2136,18 @@ def _with_longitudinal_stiffness_scale(
     stiffness: OrthotropicStiffness,
     scale: float,
 ) -> OrthotropicStiffness:
+    """Scale the longitudinal bending stiffness D11 (local-global secant coupling).
+
+    D12, D22 and D66 come from the plate and the stiffener torsion and do not
+    depend on D11, so they are not scaled.
+    """
+
     scale = max(scale, EPS)
-    d11 = stiffness.d11 * scale
-    d22 = stiffness.d22
     return OrthotropicStiffness(
-        d11=d11,
-        d12=math.sqrt(scale) * stiffness.d12,
-        d22=d22,
-        d66=math.sqrt(scale) * stiffness.d66,
+        d11=stiffness.d11 * scale,
+        d12=stiffness.d12,
+        d22=stiffness.d22,
+        d66=stiffness.d66,
         membrane_thickness=stiffness.membrane_thickness,
     )
 
@@ -4357,9 +4386,7 @@ def _stiffener_torsional_buckling(
     flange_area = flange_width * flange_thickness
     shear_modulus = panel.elastic_modulus / (2.0 * (1.0 + panel.poisson_ratio))
 
-    torsion_constant = web_height * web_thickness**3 / 3.0
-    if flange_area > 0.0:
-        torsion_constant += flange_width * flange_thickness**3 / 3.0
+    torsion_constant = stiffener_torsion_constant(panel)
 
     polar_inertia = web_area * web_height**2 / 3.0
     flange_offset = web_height + 0.5 * flange_thickness

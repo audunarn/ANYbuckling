@@ -70,7 +70,8 @@ again by an independent sweep (§8). Sections 3–7 keep the original findings a
 | S1 | High | Theory | Fixed: `auto_mode_count`, ⌈2a/b⌉ + 1 half-waves (see S1′) | c1f42ef, 8fb8376 |
 | S1′ | Medium | **Sweep**: ⌈a/b⌉ + 1 half-waves converge the elastic factor but not the first-yield ultimate (3–7 % low: README S3 1.0415 vs 1.0908 converged) | Fixed: ⌈2a/b⌉ + 1, within 0.2 % of ⌈3a/b⌉ + 1 | 8fb8376 |
 | S2 | High | RP-C201 6.6, 6.8 | Fixed (interim): equivalent drivers from k<sub>σ</sub>(ψ) and 6.8, ψ < −2 bounded by k<sub>σ</sub>(−2) | c1f42ef, d029b55 |
-| S3, S5, S6, S8, S9 | Med./Low | Theory / ECOSYSTEM_GUIDE | **Open** (empirical constants and stiffness choices; S5 quantified again in §8) | — |
+| S3, S6, S8, S9 | Med./Low | Theory / ECOSYSTEM_GUIDE | **Open** (empirical constants) | — |
+| S5 | Medium | Theory (orthotropic plate with open stiffeners) | Fixed: H = D + G I<sub>t</sub>/(2s) with I<sub>t</sub> = ⅓Σbt³, D<sub>12</sub> = νD; the local-global secant scale acts on D<sub>11</sub> only. The wide-panel σ<sub>y</sub> factor matches the closed form exactly (was 1.4–1.8× high). No PULS recalibration done | see §9 |
 | S4 | Medium | Internal | Fixed: free edge rejected; CL and GL/GT flagged in diagnostics | c1f42ef |
 | S7 | Medium | IACS CSR | Fixed | c1f42ef |
 | U1 | High | Theory | Fixed: capped at the column-type global elastic factor + stability-loss check; confidence "low" | c1f42ef |
@@ -633,4 +634,27 @@ unconservative ones are marked):
 |---|---|
 | RP-C201 | P10 (the jump at V/V<sub>Rd</sub> = 0.5); P11 (15 mm³ vs 15 cm³ floor, needs DNV-OS-C101); N1; N3 flat-bar web |
 | RP-C202 | C11, C16, C17, C19, C20, C24–C28 |
-| Semi-analytical | S3, S5 (unconservative for σ<sub>y</sub>/τ-driven global modes, see above), S6, S8, S9; U4 (sniped stiffeners under pressure, unconservative); U7 (unconservative); U8, U10, U11; the low sweep items above; PULS gates to rerun |
+| Semi-analytical | S3, S6, S8, S9 (S5 fixed after the sweep, §9); U4 (sniped stiffeners under pressure, unconservative); U7 (unconservative); U8, U10, U11; the low sweep items above; PULS gates to rerun |
+
+## 9. Follow-up: S5 fixed (after the merge)
+
+Correctness first, then calibration. `build_orthotropic_stiffness(family="global")` now uses the
+stiffness of a plate with smeared open-section stiffeners:
+- D<sub>11</sub> = E I / s (unchanged).
+- D<sub>22</sub> = D, D<sub>12</sub> = νD.
+- 2 D<sub>66</sub> = (1 − ν) D + G I<sub>t</sub> / (2s), so H = D<sub>12</sub> + 2 D<sub>66</sub> = D + G I<sub>t</sub> / (2s).
+- I<sub>t</sub> = (h<sub>w</sub>t<sub>w</sub>³ + b<sub>f</sub>t<sub>f</sub>³)/3, as implied by RP-C201 (7.32). The tripping candidate now uses the same helper.
+- The local-global secant scale multiplies D<sub>11</sub> only. The earlier √scale on D<sub>12</sub> and D<sub>66</sub> existed only because Huber's H was tied to D<sub>11</sub>.
+
+**Check.** The wide-panel σ<sub>y</sub> factor equals 2(√(D<sub>11</sub>D) + H)k<sub>x</sub>²/(σ<sub>y</sub>t) to 10⁻⁹ on three flat-bar panels (test `test_s5_wide_panel_transverse_factor_matches_orthotropic_closed_form`). It was 1.4–1.8× high before.
+
+**Effect on 157 realistic panels** (same scan as §8):
+- No UF decreased.
+- Elastic UF up by more than 1 % in 13 panels (at most 1.78×).
+- Buckling UF up by more than 1 % in 42 panels (at most 1.71×).
+- Ultimate UF up by more than 1 % in 81 panels (median +1.2 %, at most 1.71×).
+- The wide-panel σ<sub>y</sub> mode now governs the elastic factor in 14 panels (was 3).
+
+**Pinned values.** README S3 ultimate UF raw 1.0905 → 1.1432. With the fixed (1, 2, 3) × (1, 2) basis the S3 ultimate is 1.0476 (originally 0.9466). The elastic values and all U3 values are unchanged.
+
+**Not done.** No PULS recalibration. The PULS gates should be rerun once the reference data is available.
