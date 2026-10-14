@@ -2188,6 +2188,14 @@ class AllStructure():
         MpRd = Wep*(fy/gammaM) #eq7.71 checked ok
 
         Ne = ((math.pow(math.pi,2))*E*Ae)/(math.pow(lk/ie,2))# eq7.72 , checked ok
+        if NSd >= Ne > 0:
+            # Axial force at or above the Euler force: the amplification 1/(1 - NSd/NE) in (7.50)-(7.64) changes
+            # sign and the interaction would report a negative (passing) UF. The stiffener has failed.
+            for key in ('UF Plate side', 'UF Stiffener side', 'UF simply supported plate side',
+                        'UF simply supported stf side'):
+                stf_pl_data[key] = math.inf
+            stf_pl_data['NSd'], stf_pl_data['NE'] = NSd, Ne
+            return stf_pl_data
 
         #7.6  Resistance of stiffened panels to shear stresses
         Ip = math.pow(t,3)*s/10.9
@@ -2518,6 +2526,13 @@ class AllStructure():
         MpRd = Wep*(fy/gammaM) #eq7.71 checked ok
 
         NE = ((math.pow(math.pi,2))*E*AeG)/(math.pow(LGk/ie,2))# eq7.72 , checked ok
+        if NySd >= NE > 0:
+            # Axial force at or above the Euler force: the interaction formulas change sign (see stiffeners).
+            for key in ('UF Cont. plate side', 'UF Cont. girder side', 'UF Simplified plate side',
+                        'UF Simplified girder side'):
+                girder_data[key] = math.inf
+            girder_data['NySd'], girder_data['NE'] = NySd, NE
+            return girder_data
         # print(fr_dict)
         # print(fk_dict)
         # print('WeG', WeG, 'Wep', Wep)

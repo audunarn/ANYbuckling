@@ -345,3 +345,30 @@ def test_no_equivalent_pressure_when_transverse_stress_is_nowhere_compressive():
     data = structure.stiffened_panel(unstf_pl_data=unstiffened)
 
     assert data['p0'] == 0
+
+
+def test_axial_force_above_euler_force_fails_instead_of_negative_uf():
+    # FB 200x18, l = 5.2 m: N_Sd = 80*(3600 + 700*12) = 960 kN > N_E. With lateral load (p0 from sigma_y) the
+    # amplification 1/(1 - N/N_E) < 0 made every interaction term negative (reported UF -54.7).
+    t, s, l, hw, tw = 12.0, 700.0, 5200.0, 200.0, 18.0
+    area = hw * tw     # effective plate width is zero here (sigma_y = 110 > sigma_y,R)
+    inertia = tw * hw ** 3 / 12
+    euler_force = math.pi ** 2 * E * inertia / l ** 2
+    axial_force = 80 * (hw * tw + s * t)
+    assert axial_force > euler_force
+
+    results = _build(s=s, t=t, l=l, sx=80, sy=110, tau=0, p=0.0,
+                     stf=(hw, tw, 0, 0, 'FB')).get_buckling_results()['Stiffener']
+    assert results['Overpressure plate side'] == math.inf
+    assert results['Overpressure stiffener side'] == math.inf
+
+
+def test_girder_axial_force_above_euler_force_fails():
+    structure = _build(GIRDER, sx=20, sy=60, tau=0, p=0.01, gir=(200, 10, 50, 10, 'T'))._FlatStructure
+    unstiffened = structure.unstiffened_plate_buckling()
+    stiffened = structure.stiffened_panel(unstf_pl_data=unstiffened)
+    data = structure.girder(unstf_pl_data=unstiffened, stf_pl_data=stiffened)
+
+    assert data['NySd'] >= data['NE']
+    assert data['UF Cont. plate side'] == math.inf
+    assert data['UF Cont. girder side'] == math.inf
