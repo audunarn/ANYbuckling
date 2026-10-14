@@ -10,6 +10,7 @@ buckling method is intentionally not part of this package - it lives in
 ANYstructure/ANYintelligent.
 '''
 import math
+import warnings
 
 from . import helpers as api_helpers
 from .conversions import helper_cylinder_stress_to_force_to_stress
@@ -261,7 +262,8 @@ class FlatStru():
         self._FlatStructure.Plate.t = thickness
         self._FlatStructure.Plate.spacing = spacing
         self._FlatStructure.Plate.span = api_helpers.mm_to_m(span)
-        self._FlatStructure.Plate.girder_lg = 10 # placeholder value
+        if self._FlatStructure.Plate._girder_lg is None:
+            self._FlatStructure.Plate.girder_lg = 10 # placeholder until set_girder(span=...) is called
         for sub_cls in [self._FlatStructure.Stiffener, self._FlatStructure.Girder]:
             if sub_cls is not None:
                 sub_cls.t = thickness
@@ -333,7 +335,7 @@ class FlatStru():
         self._FlatStructure.Stiffener.tf = tf
         self._FlatStructure.Stiffener.stiffener_type = api_helpers.normalize_bulb_stiffener_type(stf_type)
         self._FlatStructure.Stiffener.spacing = spacing
-        self._FlatStructure.Stiffener.girder_lg = 10
+        self._FlatStructure.Stiffener.girder_lg = self._FlatStructure.Plate.girder_lg
         self._FlatStructure.Stiffener.t = self._FlatStructure.Plate.t
         self._FlatStructure.Stiffener.span = self._FlatStructure.Plate.span
         self._FlatStructure.Stiffener.mat_yield = self._FlatStructure.Plate.mat_yield
@@ -348,7 +350,8 @@ class FlatStru():
 
 
     def set_girder(self, hw: float = 500, tw: float = 15, bf: float = 200,
-                                   tf: float = 25, stf_type: str = 'T', spacing: float = 700):
+                                   tf: float = 25, stf_type: str = 'T', spacing: float = 700,
+                                   span: float = None):
         '''
         Sets the girder properties.
 
@@ -362,18 +365,31 @@ class FlatStru():
         :type tf: float
         :param stf_type: girder type, either T, FB, L or L-bulb
         :type stf_type: str
-        :param spacing: spacing between girders
+        :param spacing: spacing between girders, mm. Not used by the DNV-RP-C201 girder check, where the
+                        girder spacing is the stiffener span set in set_plate_geometry.
         :type spacing: float
+        :param span: girder span L_G (distance between girder supports), mm. If omitted, the legacy
+                     placeholder of 10 m is used and a UserWarning is issued.
+        :type span: float
         :return:
         :rtype:
         '''
+        if span is None:
+            warnings.warn('set_girder: girder span L_G not given; using the legacy 10 m placeholder girder span. '
+                          'Pass span=<L_G in mm> to check the actual girder.', UserWarning, stacklevel=2)
+            girder_span_m = 10
+        else:
+            girder_span_m = api_helpers.mm_to_m(span)
+        for sub_cls in [self._FlatStructure.Plate, self._FlatStructure.Stiffener]:
+            if sub_cls is not None:
+                sub_cls.girder_lg = girder_span_m
         self._FlatStructure.Girder.hw = hw
         self._FlatStructure.Girder.tw = tw
         self._FlatStructure.Girder.b = bf
         self._FlatStructure.Girder.tf = tf
         self._FlatStructure.Girder.stiffener_type = api_helpers.normalize_bulb_stiffener_type(stf_type)
         self._FlatStructure.Girder.spacing = spacing
-        self._FlatStructure.Girder.girder_lg = 10
+        self._FlatStructure.Girder.girder_lg = girder_span_m
         self._FlatStructure.Girder.t = self._FlatStructure.Plate.t
         self._FlatStructure.Girder.span = self._FlatStructure.Plate.span
         self._FlatStructure.Girder.mat_yield = self._FlatStructure.Plate.mat_yield

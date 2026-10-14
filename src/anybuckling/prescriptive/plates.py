@@ -487,28 +487,38 @@ class Structure():
         return Wey1, Wey2
     def get_plasic_section_modulus(self):
         '''
-        Returns the plastic section modulus
+        Returns the plastic section modulus [m^3] of stiffener with full plate flange (plate, web and flange
+        idealised as rectangles). The plastic neutral axis may lie in the plate, the web or the flange.
         :return:
         '''
         tf1 = self._plate_th
         tf2 = self._flange_th
         b1 = self._spacing
         b2 = self._flange_width
-        h = self._flange_th+self._web_height+self._plate_th
         tw = self._web_th
         hw = self._web_height
+        # (width, bottom, top) measured from the outer face of the plate
+        parts = [(b1, 0.0, tf1), (tw, tf1, tf1 + hw), (b2, tf1 + hw, tf1 + hw + tf2)]
+        parts = [part for part in parts if part[0] > 0 and part[2] > part[1]]
+        half_area = 0.5 * sum(b * (top - bottom) for b, bottom, top in parts)
 
-        Ax = tf1 * b1 + tf2 * b2 + (h-tf1-tf2) * tw
+        # equal-area axis: walk up through the parts until half of the area lies below
+        z_pna, below = 0.0, 0.0
+        for b, bottom, top in parts:
+            area = b * (top - bottom)
+            if below + area >= half_area:
+                z_pna = bottom + (half_area - below) / b
+                break
+            below += area
 
-        ezpl = (Ax/2-b1*tf1)/tw+tf1
+        modulus = 0.0
+        for b, bottom, top in parts:
+            if top <= z_pna or bottom >= z_pna:
+                modulus += b * (top - bottom) * abs(0.5 * (bottom + top) - z_pna)
+            else:
+                modulus += 0.5 * b * ((z_pna - bottom) ** 2 + (top - z_pna) ** 2)
+        return modulus
 
-        az1 = h-ezpl-tf1
-        az2 = ezpl-tf2
-
-        Wy1 = b1*tf1*(az1+tf1/2) + (tw/2)*math.pow(az1,2)
-        Wy2 = b2*tf2*(az2+tf2/2)+(tw/2)*math.pow(az2,2)
-
-        return Wy1+Wy2
     def get_shear_center(self):
         '''
         Returning the shear center
@@ -1091,6 +1101,18 @@ class CalcScantlings(Structure):
 
         return zpl
 
+    def _transverse_stress_at_l1(self):
+        '''
+        Transverse stress at l1 = min(0.25 l, 0.5 s) from the most stressed end of a linearly varying
+        distribution (same sampling point as DNV-RP-C201 sec. 6.8), independent of which end is labelled 1.
+        '''
+        if abs(self._sigma_y1) >= abs(self._sigma_y2):
+            most, least = self._sigma_y1, self._sigma_y2
+        else:
+            most, least = self._sigma_y2, self._sigma_y1
+        l1 = min(0.25*self._span, 0.5*self._spacing)
+        return most + (least - most) * (l1/self._span)
+
     def get_dnv_min_section_modulus(self, design_pressure_kpa, printit = False):
         ''' Section modulus according to DNV rules '''
 
@@ -1098,8 +1120,7 @@ class CalcScantlings(Structure):
         fy = self._mat_yield / 1e6
         fyd = fy/self._mat_factor
 
-        sigma_y = self._sigma_y2 + (self._sigma_y1-self._sigma_y2)\
-                                       *(min(0.25*self._span,0.5*self._spacing)/self._span)
+        sigma_y = self._transverse_stress_at_l1()
         sig_x1 = self._sigma_x1
         sig_x2 = self._sigma_x2
         if sig_x1 * sig_x2 >= 0:
@@ -1135,9 +1156,7 @@ class CalcScantlings(Structure):
 
         design_pressure = design_pressure_kpa
         #print(self._sigma_x1)
-        self.span
-        sigma_y = self._sigma_y2 + (self._sigma_y1-self._sigma_y2)\
-                                       *(min(0.25*self.span,0.5*self._spacing)/self._span)
+        sigma_y = self._transverse_stress_at_l1()
 
         sig_x1 = self._sigma_x1
         sig_x2 = self._sigma_x2
@@ -1732,6 +1751,7 @@ class AllStructure():
 
         unstf_pl_data['sxsd'] = sxsd
         unstf_pl_data['sy1sd'] = sy1sd
+        unstf_pl_data['psi_trans'] = shear_ratio_trans
 
         l1 = min(l/4, s/2)
         if l == 0:
@@ -1807,7 +1827,7 @@ class AllStructure():
         #6.3 & 6.8 Transverse stresses:
         ha = 0 if t == 0 else max([0,0.05*s/t-0.75])
         kp_1_for_Psd = 0 if s == 0 else 2*math.pow(t/s,2)*fy
-        kp_used = 1-ha*(psd/fy-2*math.pow(t/s,2)) if psd>kp_1_for_Psd else 1
+        kp_used = max(0, 1-ha*(psd/fy-2*math.pow(t/s,2))) if psd>kp_1_for_Psd else 1  # eq. (6.10), kp >= 0
 
         alpha_c = 0 if t*E == 0 else 1.1*s/t*math.sqrt(fy/E)
         mu = 0.21*(alpha_c-0.2)
@@ -1839,8 +1859,8 @@ class AllStructure():
         alpha_w = 0 if t*E*kl == 0 else 0.795*s/t*math.sqrt(fy/E/kl)
         if alpha_w <= 0.8:
             Ctau = 1
-        elif 0.8 < alpha_w < 1.25:
-            Ctau = 1-0.675*(alpha_w-0.8)
+        elif 0.8 < alpha_w <= 1.2:
+            Ctau = 1-0.625*(alpha_w-0.8)  # eq. (6.15)
         else:
             Ctau = 0 if alpha_w == 0 else 0.9/alpha_w
 
@@ -1858,15 +1878,15 @@ class AllStructure():
         else:
             Ctaue = 0 if alpha_w == 0 else 1/math.pow(alpha_w,2)
 
-        tauRd_comb = Ctaue*fy/gammaM/math.sqrt(3)
-        tauRd_comb = tauRd if sysd>0 else tauRd
+        # eq. (6.19) when sigma_y,Sd is compressive, eq. (6.14) when it is zero or tensile
+        tauRd_comb = Ctaue*fy/gammaM/math.sqrt(3) if sysd > 0 else tauRd
 
-        if s/t <= 120:
+        if sxsd < 0 or sysd < 0:
+            ci = 1  # either stress in tension, see text to eq. (6.18)
+        elif s/t <= 120:
             ci = 0 if t == 0 else 1-s/120/t
-        elif s/t > 120:
-            ci  = 0
         else:
-            ci = 1
+            ci = 0
 
         sxRd_comb = fy/gammaM if all([sig_x1<0, sig_x2<0]) else sxRd
         syRd_comb = syRd
@@ -1911,8 +1931,7 @@ class AllStructure():
         psd = self._lat_press * self._lat_load_factor
         psd_min_adj = psd if self._min_lat_press_adj_span is None else\
             self._min_lat_press_adj_span*self._lat_load_factor
-        shear_ratio_long = 1
-        shear_ratio_trans = 1
+        shear_ratio_trans = unstf_pl_data.get('psi_trans', 1)  # psi = sigma_y2,Sd / sigma_y1,Sd in eq. (7.9)
 
         #Pnt.7:  Buckling of stiffened plates
         Vsd = psd*s*l/2
@@ -1967,6 +1986,8 @@ class AllStructure():
         Co= 0 if kc*E*t*s == 0 else Weff*fy*mc/(kc*E*math.pow(t,2)*s)
         Po = 0 if all([sig_y1 < 0, sig_y2 < 0]) else (0.6+0.4*shear_ratio_trans)*Co*sy1sd \
             if shear_ratio_trans >-1.5 else 0
+        stf_pl_data['C0'] = Co
+        stf_pl_data['p0'] = Po
 
         qsd_press = (psd+abs(Po))*s
         qsd_opposite = abs(Po)*s if psd < Po else 0
@@ -2007,6 +2028,13 @@ class AllStructure():
         stf_pl_data['UF Plate resistance'] = uf_stf_panel_res_bet_plate
         if optimizing and uf_stf_panel_res_bet_plate > 1:
             return ['UF Plate resistance', uf_stf_panel_res_bet_plate]
+        if Vsd_div_Vrd >= 1:
+            # Eq. (7.76) is not satisfied: the reduced web thickness below is zero, so no axial/bending
+            # resistance can be assigned to the stiffener. Report failure instead of dividing by zero.
+            for key in ('UF Plate side', 'UF Stiffener side', 'UF simply supported plate side',
+                        'UF simply supported stf side'):
+                stf_pl_data[key] = math.inf
+            return stf_pl_data
         #7.5  Characteristic buckling strength of stiffeners
 
         fEpx = 0 if s == 0 else 3.62*E*math.pow(t/s,2) # eq 7.42, checked, ok
@@ -2114,29 +2142,32 @@ class AllStructure():
         fk_dict['plate'] = fk
         #Stiffener side
 
-        for lT in [int(l if self._stf_dist_between_lateral_supp is None else self._stf_dist_between_lateral_supp),
-                   int(0.4*l if self._stf_dist_between_lateral_supp is None else self._stf_dist_between_lateral_supp),
-                   int(0.8*l if self._stf_dist_between_lateral_supp is None else self._stf_dist_between_lateral_supp)]:
+        # Torsional buckling length: distance between lateral supports (or l) for N_ks,Rd, eq. (7.66);
+        # 0.4 l and 0.8 l, or the distance between lateral supports if this is less, for M_s1,Rd and
+        # M_s2,Rd, eq. (7.68) and (7.69).
+        lateral_support = self._stf_dist_between_lateral_supp
+        lT_values = {'Nks': l if lateral_support is None else lateral_support,
+                     'Ms1': 0.4*l if lateral_support is None else min(0.4*l, lateral_support),
+                     'Ms2': 0.8*l if lateral_support is None else min(0.8*l, lateral_support)}
+        for lT_key, lT in lT_values.items():
             params = lt_params(lT)
             fr = params['fT'] if params['alphaT']>0.6 else fy
-            fr_dict[lT] = fr
+            fr_dict[lT_key] = fr
             alpha = math.sqrt(fr / fE)
             mu = 0 if ie == 0 else (0.34 + 0.08 * zt  / ie) * (alpha - 0.2)
             fk_div_fr = (1 + mu + math.pow(alpha, 2) - math.sqrt(
                 math.pow(1 + mu + math.pow(alpha, 2), 2) - 4 * math.pow(alpha, 2))) / (2 * math.pow(alpha, 2))
             fk = fk_div_fr * fr if alpha > 0.2 else fr
-            fk_dict[lT] = fk
+            fk_dict[lT_key] = fk
 
         #7.7.3  Resistance parameters for stiffeners
 
         NRd = 0.0001 if gammaM == 0 else Ae * (fy / gammaM)  # eq7.65, checked ok
-        NksRd = Ae * (fk_dict[int(l if self._stf_dist_between_lateral_supp is None else self._stf_dist_between_lateral_supp)] / gammaM) #eq7.66
+        NksRd = Ae * (fk_dict['Nks'] / gammaM) #eq7.66
         NkpRd = Ae * (fk_dict['plate'] / gammaM)  # checked ok
 
-        Ms1Rd = Wes * (fr_dict[int(0.4*l if self._stf_dist_between_lateral_supp is None else
-                                   self._stf_dist_between_lateral_supp)] / gammaM)  # ok
-        Ms2Rd = Wes * (fr_dict[int(0.8*l if self._stf_dist_between_lateral_supp is None else
-                                   self._stf_dist_between_lateral_supp)] / gammaM)  # eq7.69 checked ok
+        Ms1Rd = Wes * (fr_dict['Ms1'] / gammaM)  # eq7.68
+        Ms2Rd = Wes * (fr_dict['Ms2'] / gammaM)  # eq7.69
 
         MstRd = Wes*(fy/gammaM) #eq7.70 checked ok
         MpRd = Wep*(fy/gammaM) #eq7.71 checked ok
@@ -2284,6 +2315,12 @@ class AllStructure():
             return ['UF shear force', Vsd_div_Vrd]
 
         CHK_account_for_interaction = Vsd < 0.5*Vrd
+        if Vsd_div_Vrd >= 1:
+            # Eq. (7.76) is not satisfied (see sec. 8.1): no residual axial/bending resistance is assigned.
+            for key in ('UF Cont. plate side', 'UF Cont. girder side', 'UF Simplified plate side',
+                        'UF Simplified girder side'):
+                girder_data[key] = math.inf
+            return girder_data
 
         #8.2  Girder forces
         As = self._Stiffener.tw*self._Stiffener.hw + self._Stiffener.b*self._Stiffener.tf
@@ -2304,7 +2341,10 @@ class AllStructure():
         tcrg = 0.6*fy/math.pow(alpha_t1,2) if alpha_t1 > 1 else 0.6*fy
         tcrl = 0.6*fy/math.pow(alpha_t2,2) if alpha_t2 > 1 else 0.6*fy
 
-        tcrg = tcrg if self._stf_end_support == 'Continuous' else 0
+        # Panel length not given: use the limit L_P -> infinity (tau_ceg -> 0, tau_crg -> 0) rather than
+        # the most favourable value 0.6 fy. Sniped stiffeners: tau_crg = 0 (sec. 8.2).
+        tcrg = tcrg if self._stf_end_support == 'Continuous' and Lp > 0 else 0
+        girder_data['tau_crg'] = tcrg
 
         #8.4 Effective width of girders
 
@@ -2346,6 +2386,11 @@ class AllStructure():
         Iy = self._Girder.get_moment_of_intertia(efficent_se=le / 1000) * 1000 ** 4
         zp = self._Girder.get_cross_section_centroid_with_effective_plate(le / 1000) * 1000 - t / 2  # ch7.5.1 page 19
         zt = (t / 2 + self._Girder.hw + self._Girder.tf) - zp  # ch 7.5.1 page 19
+        # Section moduli W_ep, W_eG with le limited to 0.3 LG (continuous) / 0.4 LG (sniped), sec. 8.4.2
+        le_W = eff_width_sec_mod
+        Iy_W = self._Girder.get_moment_of_intertia(efficent_se=le_W / 1000) * 1000 ** 4
+        zp_W = self._Girder.get_cross_section_centroid_with_effective_plate(le_W / 1000) * 1000 - t / 2
+        zt_W = (t / 2 + self._Girder.hw + self._Girder.tf) - zp_W
 #
         def red_prop():
             twG =max(0,self._Girder.tw*(1-Vsd_div_Vrd))
@@ -2355,9 +2400,9 @@ class AllStructure():
             AtotG = Ag+le*t-self._Girder.hw*(self._Girder.tw - twG)
             Ipo = self._Girder.get_polar_moment(reduced_tw=twG)
             IzG = self._Girder.get_Iz_moment_of_inertia(reduced_tw=twG)
-            Iy = self._Girder.get_moment_of_intertia(efficent_se=le/1000, reduced_tw=twG)*1000**4
+            Iy = self._Girder.get_moment_of_intertia(efficent_se=le_W/1000, reduced_tw=twG)*1000**4
 
-            zp = self._Girder.get_cross_section_centroid_with_effective_plate(le / 1000, reduced_tw=twG) * 1000 - t / 2  # ch7.5.1 page 19
+            zp = self._Girder.get_cross_section_centroid_with_effective_plate(le_W / 1000, reduced_tw=twG) * 1000 - t / 2  # ch7.5.1 page 19
             zt = (t / 2 + self._Girder.hw + self._Girder.tf) - zp  # ch 7.5.1 page 19
             WeG = 0.0001 if zt == 0 else Iy / zt
             Wep = 0.0001 if zp == 0 else Iy / zp
@@ -2365,8 +2410,8 @@ class AllStructure():
             return {'tw':twG, 'Atot': AtotG, 'Ipo': Ipo, 'IzG': IzG, 'zp': zp, 'zt': zt, 'WeG': WeG, 'Wep': Wep}
 
         if Vsd_div_Vrd < 0.5:
-            WeG = 0.0001 if zt == 0 else Iy/zt
-            Wep = 0.0001 if zp == 0 else Iy/zp
+            WeG = 0.0001 if zt_W == 0 else Iy_W/zt_W
+            Wep = 0.0001 if zp_W == 0 else Iy_W/zp_W
             AeG = Ag+eff_width_other_calc*t
         else:
             red_param = red_prop()
@@ -2394,9 +2439,11 @@ class AllStructure():
         p0calc = 0 if s*self._Girder.hw*Lg*E*l==0 else 0.4*(t+As/s)/(self._Girder.hw*(1-s/Lg))*fy/E*math.pow(Lg/l,2)\
                                                        *(sxsd+C*tsd)
         p0_compression = max([p0lim,p0calc])
-        p0_tension = 0 if s*Lg*self._Girder.hw*E*l==0 else 0.4*(t+As/s)/(self._Girder.hw*(l-s/Lg))*gammaM/E\
-                                                          *math.pow(Lg/l,2)*(C*tsd)
+        p0_tension = 0 if s*Lg*self._Girder.hw*E*l==0 else 0.4*(t+As/s)/(self._Girder.hw*(1-s/Lg))*fy/E\
+                                                          *math.pow(Lg/l,2)*(C*tsd)  # eq. (8.7)
         p0 = p0_tension if sxsd<0 else p0_compression
+        girder_data['C'] = C
+        girder_data['p0'] = p0
 
         qSd_pressure = (psd+p0_tension)*l if sxsd<0 else (psd+p0_compression)*l
         qsd_oppsite = p0*l if psd<p0 else 0
@@ -2424,8 +2471,11 @@ class AllStructure():
 
         fk_dict = dict()
         fr_dict = dict()
-        for lT in ['plate', Ltg, 0.4*Lg, 0.8*Lg]:
-            if lT != 'plate':
+        # N_ks,Rd with the distance between lateral supports L_GT; M_s1,Rd / M_s2,Rd with 0.4 LG / 0.8 LG or the
+        # distance between lateral supports if this is less, eq. (8.12) and (8.13).
+        lT_values = {'plate': None, 'Nks': Ltg, 'Ms1': min(0.4*Lg, Ltg), 'Ms2': min(0.8*Lg, Ltg)}
+        for lT_key, lT in lT_values.items():
+            if lT_key != 'plate':
                 params = lt_params(lT)
                 fr = params['fT'] if params['alphaT']>0.6 else fy
                 alpha = math.sqrt(fr / fE)
@@ -2434,21 +2484,20 @@ class AllStructure():
                 fr = fy
                 alpha = math.sqrt(fr / fE)
                 mu = 0 if ie == 0 else (0.34 + 0.08 * zp / ie) * (alpha - 0.2)
-            fr_dict[lT] = fr
+            fr_dict[lT_key] = fr
             fk_div_fr = (1 + mu + math.pow(alpha, 2) - math.sqrt(
                 math.pow(1 + mu + math.pow(alpha, 2), 2) - 4 * math.pow(alpha, 2))) / (2 * math.pow(alpha, 2))
             fk = fk_div_fr * fr if alpha > 0.2 else fr
-            fk_dict[lT] = fk
+            fk_dict[lT_key] = fk
 
         # #7.7.3  Resistance parameters for stiffeners
 
         NRd = 0.0001 if gammaM == 0 else AeG * (fy / gammaM)  # eq7.65, checked ok
 
-        NksRd = AeG * (fk_dict[Ltg] / gammaM) #eq7.66
-        NkpRd = AeG * (fk_dict['plate'] / gammaM)  # checked ok
-        MsRd = WeG*fr_dict[Ltg]/gammaM
-        Ms1Rd = WeG * (fr_dict[0.4*Lg] / gammaM)  # ok
-        Ms2Rd = WeG * (fr_dict[0.8*Lg] / gammaM)  # eq7.69 checked ok
+        NksRd = AeG * (fk_dict['Nks'] / gammaM) # eq. (8.9)
+        NkpRd = AeG * (fk_dict['plate'] / gammaM)  # eq. (8.10)
+        Ms1Rd = WeG * (fr_dict['Ms1'] / gammaM)  # eq. (8.12)
+        Ms2Rd = WeG * (fr_dict['Ms2'] / gammaM)  # eq. (8.13)
 
         MstRd = WeG*(fy/gammaM) #eq7.70 checked ok
         MpRd = Wep*(fy/gammaM) #eq7.71 checked ok
@@ -2483,7 +2532,7 @@ class AllStructure():
             uf_7_62 = NySd/NksRd-2*NySd/NRd+(NySd*zstar-(qSd_girder_side*math.pow(Lg, 2)/8))/(MstRd*(1-NySd/NE))+u
             uf_7_63 = NySd/NkpRd+(NySd*zstar-(qSd_girder_side*math.pow(Lg, 2)/8))/(MpRd*(1-NySd/NE))+u
 
-            max_uf_simp_stiffener = max([0,uf_7_60,uf_7_61]) if CHK_qSd_NSd else max([0,uf_7_60,uf_7_61, uf_7_62,uf_7_63])
+            max_uf_simp_stiffener = max([0,uf_7_62,uf_7_63]) if CHK_qSd_NSd else max([0,uf_7_60,uf_7_61])
             girder_data['UF Simplified girder side'] = max_uf_simp_stiffener
         else:
             u = 0
@@ -2524,6 +2573,11 @@ class AllStructure():
             else:
                 girder_data['UF Cont. girder side'] = res_iter_girder.fun
 
+        girder_data.update({'NySd': NySd, 'NRd': NRd, 'NksRd': NksRd, 'NkpRd': NkpRd, 'NE': NE,
+                            'MstRd': MstRd, 'MpRd': MpRd, 'Ms1Rd': Ms1Rd, 'Ms2Rd': Ms2Rd, 'WeG': WeG, 'Wep': Wep,
+                            'le': le, 'le section modulus': eff_width_sec_mod, 'LG': Lg,
+                            'qSd plate side': qSd_plate_side, 'qSd girder side': qSd_girder_side,
+                            'zstar': zp if self._girder_end_support != 'Continuous' else None})
         return girder_data
 
     def local_buckling(self, optimizing = False):

@@ -40,7 +40,10 @@ def test_plastic_sec_mod(structure_cls):
     results = [item.get_plasic_section_modulus() for item in structure_cls]
 
     assert all(result > 0 for result in results)
-    assert results[0] == pytest.approx(0.01781929526454241)
+    # Independent equal-area calculation (plastic neutral axis 15.8 mm into the 25 mm plate):
+    # 9.4092e-4 m3, see tests/test_plate_review_fixes.py. The previous pinned value 0.0178 m3 assumed
+    # the neutral axis in the web and was 19x too large.
+    assert results[0] == pytest.approx(9.409210956245264e-04)
 
 def test_moment_of_intertia(structure_cls):
     results = [item.get_moment_of_intertia() for item in structure_cls]

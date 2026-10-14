@@ -15,7 +15,7 @@ def flat_panel_builder():
         if domain != 'Flat plate, unstiffened':
             panel.set_stiffener(hw=260, tw=12, bf=49, tf=28, stf_type='bulb', spacing=680)
         if domain == 'Flat plate, stiffened with girder':
-            panel.set_girder(hw=500, tw=15, bf=200, tf=25, stf_type='T', spacing=700)
+            panel.set_girder(hw=500, tw=15, bf=200, tf=25, stf_type='T', spacing=700, span=10000)
         panel.set_fixation_parameters()
         panel.set_buckling_parameters(calculation_method=method,
                                       buckling_acceptance='ultimate',
