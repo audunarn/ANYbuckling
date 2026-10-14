@@ -8,6 +8,82 @@
 | Environment | Python 3.13, numpy 2.5.3, scipy (latest from PyPI), Linux; numba not installed (pure-Python solver paths) |
 | Reproduction | `python docs/review/checks/verify_c201_plates.py`, `verify_c202_cylinders.py`, `verify_semianalytical.py` (from the repository root after `pip install -e .`) |
 
+## 0. Status after checking the standards and fixing (update, 2026-10-14)
+
+After the first review pass, every finding was checked against the texts of **DNV-RP-C201
+(October 2010)** and **DNV-RP-C202 (January 2013)** supplied by the owner, and the confirmed
+defects were fixed on this branch. Each fix has a regression test that fails without it, with
+expected values from independent hand calculations, closed-form theory or properties the
+standard requires (invariance, monotonicity, continuity). Each set of fixes was then reviewed
+again by an independent sweep (§8). Sections 3–7 keep the original findings and the values
+**before** the fixes; the table below is authoritative for their status.
+
+| ID | Sev. | Check against the standard | Status | Commit |
+|---|---|---|---|---|
+| P1 | High | — (API) | Fixed: `set_girder(span=…)`; omitted → warning and the 10 m placeholder; a later call keeps an earlier span | 23068b9, 329e7dd |
+| P2 | High | Confirmed, RP-C201 (7.61)–(7.64) | Fixed | 23068b9 |
+| P3 | — | **Withdrawn**: 7.7.1 minimises (7.50)–(7.53) *or* (7.54)–(7.57), so a separate z\* per pressure side is allowed | No change | — |
+| P4 | — | **Not a deviation**: (7.32) implies I<sub>t</sub> = ⅓(h<sub>w</sub>t<sub>w</sub>³ + b t<sub>f</sub>³) | Kept as a physics note (stocky bulb flanges) | — |
+| P5 | Medium | Confirmed, (6.18)–(6.20) | Fixed | 23068b9 |
+| P6 | Medium | Confirmed, 8.4.2 | Fixed | 23068b9 |
+| P7 | Medium | Confirmed, (8.7) | Fixed | 23068b9 |
+| P8 | Medium | (8.6) consistent; the default for unknown L<sub>P</sub> was the most favourable value | Fixed: unknown L<sub>P</sub> → τ<sub>crg</sub> = 0 (L<sub>P</sub> → ∞) | 23068b9 |
+| P9 | Medium | Confirmed, (6.15) | Fixed | 23068b9 |
+| P10 | Medium | 7.8 requires a reduction for V > 0.5 V<sub>Rd</sub> but gives no formula | Crash fixed (V ≥ V<sub>Rd</sub> → UF = ∞); jump at 0.5 **open** (owner decision) | 23068b9 |
+| P11 | Medium | DNV-OS-C101 (not supplied) | σ<sub>y</sub> sampling fixed; 15 mm³ vs 15 cm³ floor **open** | 23068b9 |
+| P12 | Low | Confirmed, (7.9) | Fixed | 23068b9 |
+| P13 | Low | Theory | Fixed (and the pinned test value) | 23068b9 |
+| P14 | Medium | **New**: c<sub>i</sub> = 1.0 if either stress is tensile (text to (6.18)) | Fixed | 23068b9 |
+| P15 | Low | **New**: k<sub>p</sub> ≥ 0, (6.10) | Fixed; zero resistance fails (UF = ∞) | 23068b9, 329e7dd |
+| P16 | Low | **New**: l<sub>T</sub> = min(0.4 l, support distance) etc., (7.68)/(7.69), (8.12)/(8.13) | Fixed | 23068b9 |
+| N1 | Low | **New (sweep)**: C<sub>yG</sub> for tensile σ<sub>y</sub> "may be taken as 1.0" (8.21); code uses a smaller value | **Open** (conservative) | — |
+| N2 | Low | **New (sweep)**: p<sub>0</sub> = 0 when σ<sub>y</sub> is nowhere compressive, (7.9)/(7.10) | Fixed | 329e7dd |
+| N3 | Low | **New (sweep)**: 'Local buckling' returns allowable dimensions (9.1), not UFs; flat-bar web not checked against (9.2) | Docstring fixed; flat-bar web **open** | 329e7dd |
+| C1 | High | Internal | Fixed | 46cd5a6 |
+| C2 | High | Internal (Sec 4.2.3) | Fixed; stress/force input recorded explicitly by the API | 46cd5a6, d301655 |
+| C3 | High | (3.2.2), (3.6.4), (3.6.7) | Fixed: term-by-term λ<sub>s</sub>², C → ρξ as s<sub>e</sub> → 0 | 46cd5a6 |
+| C4 | High | Confirmed, (2.2.3), (3.2.5) | Fixed (geometries 3 and 7) | 46cd5a6 |
+| C5 | High | Confirmed, 3.4.1 b), 3.8 | Fixed: column check (3.8.1)–(3.8.12) for geometries 1 and 2 | 46cd5a6 |
+| C6 | High | Confirmed, (3.8.6) | Fixed | 46cd5a6 |
+| C7 | High | Internal (2.2.2)–(2.2.7) | Fixed | 46cd5a6 |
+| C8 | Medium (was High) | 3.5.2.7 is an allowed alternative to I<sub>h</sub> | Fixed (index) | 46cd5a6 |
+| C9 | Medium | (3.1.3) is defined for γ<sub>M0</sub> = 1.15 only | Fixed (whole-curve scaling, continuous) | 46cd5a6 |
+| C10 | Medium | Confirmed, (3.10.5) | Fixed | 46cd5a6 |
+| C11 | Medium | (3.10.1)/(3.10.2) are not pass/fail: failing them means f<sub>r</sub> = f<sub>T</sub> | **Open**: needs redesign, not re-enabling | — |
+| C12 | Medium | Confirmed, 3.3.2 | Fixed | 46cd5a6 |
+| C13 | Medium | Confirmed, Table 3-2 notes 1/2 | Fixed: `is_included=True` → ψ = 4, default `False` → ψ = 2 (previous default results kept) | 46cd5a6, d301655 |
+| C14 | Medium | Confirmed, 3.5.2.6 | Fixed | 46cd5a6 |
+| C15 | — | **Withdrawn**: 3.8.2 defines f<sub>ak</sub> with the actual σ<sub>m</sub>, σ<sub>h</sub>, τ | No change | — |
+| C16, C17, C19, C20 | Low | — | **Open** (C20's σ<sub>h</sub> double count at line 692 fixed) | 46cd5a6 |
+| C18 | Low | Confirmed, (3.5.4) | Fixed | 46cd5a6 |
+| S1 | High | Theory | Fixed: `auto_mode_count` (≈ a/b half-waves) | c1f42ef |
+| S2 | High | RP-C201 6.6, 6.8 | Fixed (interim): equivalent drivers from k<sub>σ</sub>(ψ) and 6.8, ψ < −2 bounded by k<sub>σ</sub>(−2) | c1f42ef, d029b55 |
+| S3, S5, S6, S8, S9 | Med./Low | Theory / ECOSYSTEM_GUIDE | **Open** (empirical constants and stiffness choices) | — |
+| S4 | Medium | Internal | Fixed: free edge rejected; CL and GL/GT flagged in diagnostics | c1f42ef |
+| S7 | Medium | IACS CSR | Fixed | c1f42ef |
+| U1 | High | Theory | Fixed: capped at the column-type global elastic factor + stability-loss check; confidence "low" | c1f42ef |
+| U2 | High | ECOSYSTEM_GUIDE | Fixed: lift removed | c1f42ef |
+| U3 | High | Internal | Fixed: load factors applied; pressure side recorded only (plate side modelled) | c1f42ef |
+| U4 | High | Theory | **Open** (sniped stiffeners under lateral pressure) | — |
+| U5 | High | Internal | Fixed: both ends solved, envelope reported | c1f42ef |
+| U6 | High | Internal | Fixed | c1f42ef |
+| U7, U8, U10, U11 | Med./Low | Theory / ECOSYSTEM_GUIDE | **Open** | — |
+| U9 | Medium | Internal (equilibrium) | Fixed | c1f42ef |
+
+**Behaviour changes users will notice**
+
+- `FlatStru.set_girder(..., span=L_G_mm)`: girder checks now use the real girder span; omitting
+  it warns.
+- `CylStru.set_end_cap_pressure_included_in_stress(is_included=False)` now means what its name
+  says, and its default is `False`, which keeps the previous default results.
+- Unstiffened cylinders and curved panels now report `Column stability check` /
+  `Column stability UF`.
+- SemiAnalytical results change for panels with L/s > 3 (S1), stress gradients (S2, U9), load
+  factors ≠ 1 (U3), mixed-sign axial stress (U5), pressure-dominated panels (U2) and slender
+  columns (U1). Example: README S3 panel, ultimate UF raw 0.947 → 1.042; U3 test row
+  0.917 → 1.068. Solves are slower for long panels (S3 up to ≈ 0.1 s at L/s = 12, previously
+  ≈ 0.01 s).
+
 ## 1. How the review was done, and its limits
 
 * Every formula path listed in the scope was read line by line and compared with the
@@ -16,15 +92,13 @@
   public API before being listed here. Suspected issues that did not reproduce were
   dropped (for example, a suspected sign flip of the C201 interaction equations when
   N<sub>Sd</sub> > N<sub>E</sub> turned out to be harmless because N<sub>Sd</sub>/N<sub>ks,Rd</sub> already exceeds 1).
-* **The text of the standards was not available in the review environment** (network
-  access to DNV and to public mirrors was blocked). Comparisons with DNV-RP-C201
-  (Oct 2010) and DNV-RP-C202 (2013 / DNVGL 2017–2021) rely on the reviewers' knowledge
-  of those documents. Each finding therefore states its basis:
+* The first pass was made without the texts of the standards (network access to DNV was
+  blocked); the owner then supplied DNV-RP-C201 (Oct 2010) and DNV-RP-C202 (Jan 2013) and every
+  finding was re-checked against them (§0). Each finding states its basis:
   * **Internal** – the code contradicts itself (wrong variable, dead variable, inverted
     branch, unit slip, a setting that is silently ignored). These do not depend on how
     the standard is worded.
-  * **Standard** – the code deviates from the standard as we know it. Please confirm
-    these against your copy before changing code.
+  * **Standard** – the code deviates from the standard (now checked against the text; see §0).
   * **Theory** – the semi-analytical solver deviates from classical plate/beam theory
     (closed-form results that are not in doubt).
 * Severity: **High** = can report a passing UF where the correct UF fails, or the number
@@ -103,14 +177,14 @@ parameters; 8.5 L<sub>GT0</sub> and f<sub>ET,G</sub>; elastic section properties
 (7.60)/(7.61), whose bending term is then negative. (The stiffener version at
 `plates.py:2174–2178` is correct.) σ<sub>y</sub> = 40, no pressure: code UF 0.175, correct 1.144.
 
-**P3 — z\* is optimised separately for the plate-side and stiffener-side equation sets.** High · Standard
+**P3 — z\* is optimised separately for the plate-side and stiffener-side equation sets.** ~~High · Standard~~ **Withdrawn** after checking the text: RP-C201 7.7.1 selects z\* to minimise (7.50)–(7.53) *or* (7.54)–(7.57).
 `plates.py:2201, 2220` (stiffeners) and `2506, 2520` (girders). RP-C201 7.7.1 selects one z\* so that
 the maximum of (7.50)–(7.57) is minimised; z\* is a property of the end connection and cannot
 differ between the two pressure directions. With the default `pressure_side='both sides'`,
 reporting min<sub>z</sub> A(z) and min<sub>z</sub> B(z) instead of min<sub>z</sub> max(A, B) is unconservative:
 README panel 1.571 → 1.710; flat bar 200×14, σ<sub>x</sub> = 120, p = 0.1: 0.878 → 1.148.
 
-**P4 — St. Venant torsion constant omits the (1 − 0.63 t<sub>f</sub>/b<sub>f</sub>) flange factor.** High for bulbs · Standard
+**P4 — St. Venant torsion constant omits the (1 − 0.63 t<sub>f</sub>/b<sub>f</sub>) flange factor.** **Not an RP deviation** after checking the text: (7.32) implies the thin-wall I<sub>t</sub> used by the code. Kept as a physics note for stocky bulb idealisations.
 `plates.py:651`: I<sub>t</sub> = (h<sub>w</sub>t<sub>w</sub>³ + b<sub>f</sub>t<sub>f</sub>³)/3. RP-C201 7.5.2:
 I<sub>t</sub> = ⅓(h<sub>w</sub>t<sub>w</sub>³ + b<sub>f</sub>t<sub>f</sub>³(1 − 0.63 t<sub>f</sub>/b<sub>f</sub>)). For the bulb-as-angle idealisation
 (49×28, t<sub>f</sub>/b<sub>f</sub> = 0.57) I<sub>t</sub> is 34 % too high and f<sub>T</sub> up to 20 % too high. README bulb,
@@ -215,7 +289,7 @@ unconservative beyond it.
 M = T = 10 000 kNm, r = 6.5 m, t = 19 mm: σ<sub>m</sub> = 3 971 MPa (hand 3.965), τ<sub>T</sub> = 1 983 MPa
 (hand 1.983). Axial force and shear force are converted correctly.
 
-**C8 — Ring stiffener I<sub>h</sub> requirement silently excluded for geometries 5/6.** High/Medium · Internal
+**C8 — Ring stiffener I<sub>h</sub> requirement silently excluded for geometries 5/6.** Medium · Internal (3.5.2.7 is an allowed alternative to I<sub>h</sub>)
 `cylinders.py:676–678` appends `nan` for the absent longitudinal stiffener, shifting `shRsd` so
 `ring_stiffened_shell` (`1257–1266`) reads `nan` for the ring; `Ih > 0` is then False and I<sub>h</sub> is
 dropped from I<sub>R</sub>. Reviewer's example† (p = −0.3, σ<sub>a</sub> = −20, τ = 5): ring UF 3.60 vs 22.1 with the
@@ -246,8 +320,8 @@ bool, so ψ for hydrostatic pressure is always used.
 `cylinders.py:1255–1256` compares with `1`; the API stores `'Fabricated'` / `'Cold formed'`, so
 f<sub>r</sub> = 0.9 f<sub>T</sub> is always used.
 
-**C15–C20 — Low (†/source).** f<sub>ak</sub> for the column check includes σ<sub>m</sub>, which the interaction formula counts
-again (suspected, conservative; `981/986`, `1111/1116`). Column section properties use the
+**C15–C20 — Low (†/source).** ~~f<sub>ak</sub> for the column check includes σ<sub>m</sub>, which the interaction formula counts
+again~~ (C15 **withdrawn**: RP-C202 3.8.2 defines f<sub>ak</sub> with the actual σ<sub>m</sub>, σ<sub>h</sub>, τ applied). Column section properties use the
 dimensions of the last stiffener object looped over (`1575–1578`). η in 3.9 mixes panel f<sub>ks</sub> with
 cylinder γ<sub>M</sub> (`1563–1573`, negligible). Shell effective width l<sub>e</sub> not capped at l (`634/639`).
 A zero f<sub>ak</sub> is reported as "Column stability UF = 0". G = 80 769.2 and ν = 0.3 hard-coded.
@@ -438,9 +512,9 @@ verification harness gates changes on error against PULS reference data
 repository's history is a single import commit, so whether the constants were tuned against PULS
 cannot be established here; it should be documented either way, as the ECOSYSTEM_GUIDE requires.
 
-## 7. Recommendations
+## 7. Recommendations (from the first pass; see §0 for what has been done)
 
-1. **Until U1/U2 are fixed, do not use the SemiAnalytical *ultimate* UF for acceptance.** In every
+1. **Until U1/U2 are fixed, do not use the SemiAnalytical *ultimate* UF for acceptance.** (Done: U1, U2 fixed.) In every
    reproduced U1 case the SemiAnalytical *buckling* UF was the safe one (4.88 vs 0.29). Consider
    making `'buckling'` the default acceptance for that method, or capping the reported ultimate
    capacity at the global elastic factor, and flagging such runs as low confidence.
